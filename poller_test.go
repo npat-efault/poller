@@ -1,40 +1,119 @@
 package poller
 
 import (
+	"fmt"
+	"io"
 	"syscall"
 	"testing"
 	"time"
 )
 
-// !! ATTENTION !! We unconditionally delete this file !!
-const fifo = "/tmp/poller-test-fifo"
+// !! ATTENTION !! We unconditionally delete files named like this !!
+const fifo = "/tmp/poller-test-fifo" // /tmp/poler-test-fifoXXX
 
-const (
-	o_RW = (syscall.O_NOCTTY |
-		syscall.O_CLOEXEC |
-		syscall.O_RDWR |
-		syscall.O_NONBLOCK) // Open file for read and write
-	o_RO = (syscall.O_NOCTTY |
-		syscall.O_CLOEXEC |
-		syscall.O_RDONLY |
-		syscall.O_NONBLOCK) // Open file for read
-	o_WO = (syscall.O_NOCTTY |
-		syscall.O_CLOEXEC |
-		syscall.O_WRONLY |
-		syscall.O_NONBLOCK) // Open file for write
-	o_MODE = 0666
-)
+func fifoName(i int) string {
+	return fifo + fmt.Sprintf("%03d", i)
+}
 
-func mkfifo(t *testing.T) {
-	_ = syscall.Unlink(fifo)
-	err := syscall.Mkfifo(fifo, 0666)
+func mkFifo(t *testing.T, i int) {
+	name := fifoName(i)
+	syscall.Unlink(name)
+	err := syscall.Mkfifo(name, 0666)
 	if err != nil {
-		t.Fatal("mkfifo:", err)
+		t.Fatalf("mkfifo %s: %v", name, err)
 	}
 }
 
-func TestRead(t *testing.T) {
-	sysfd, err := syscall.Open("/dev/null", o_RW, o_MODE)
+func openFifo(t *testing.T, i int, read bool) *FD {
+	name := fifoName(i)
+	flags := O_RO
+	if !read {
+		flags = O_WO
+	}
+	fd, err := Open(name, flags)
+	if err != nil {
+		t.Fatalf("Open %s: %v", name, err)
+	}
+	return fd
+}
+
+func waitNTmo(t *testing.T, ch <-chan bool, n int, d time.Duration) {
+	tmo := time.After(d)
+	for i := 0; i < n; i++ {
+		select {
+		case <-ch:
+		case <-tmo:
+			t.Fatal("Timeout!")
+		}
+	}
+}
+
+func waitN(t *testing.T, ch <-chan bool, n int) {
+	waitNTmo(t, ch, n, 15*time.Second)
+}
+
+func readStr(t *testing.T, fd *FD, s string) {
+	b := make([]byte, len(s))
+	n, err := fd.Read(b)
+	if err != nil {
+		t.Fatal("Read:", err)
+	}
+	if n != len(s) {
+		t.Fatalf("Read %d != %d", n, len(s))
+	}
+	if string(b) != s {
+		t.Fatalf("Read \"%s\" != \"%s\"", string(b), s)
+	}
+}
+
+func writeStr(t *testing.T, fd *FD, s string) {
+	n, err := fd.Write([]byte(s))
+	if err != nil {
+		t.Fatal("Write:", err)
+	}
+	if n != len(s) {
+		t.Fatalf("Write %d != %d", n, len(s))
+	}
+}
+
+func readBlock(t *testing.T, fd *FD, n, bs int, dly time.Duration) {
+	b := make([]byte, bs)
+	for i := 0; i < n; i++ {
+		nn := 0
+		for {
+			n, err := fd.Read(b[nn:])
+			if err != nil {
+				t.Fatal("readBlock:", err)
+			}
+			nn += n
+			if nn == bs {
+				break
+			}
+		}
+		if dly != 0 {
+			time.Sleep(dly)
+		}
+	}
+}
+
+func writeBlock(t *testing.T, fd *FD, n, bs int, dly time.Duration) {
+	b := make([]byte, bs)
+	for i := 0; i < n; i++ {
+		nn, err := fd.Write(b)
+		if err != nil {
+			t.Fatal("writeBlock:", err)
+		}
+		if nn != bs {
+			t.Fatalf("writeBlock %d != %d", nn, bs)
+		}
+		if dly != 0 {
+			time.Sleep(dly)
+		}
+	}
+}
+
+func TestNewFDFail(t *testing.T) {
+	sysfd, err := syscall.Open("/dev/null", O_RW, 0666)
 	if err != nil {
 		t.Fatal("Open /dev/null:", err)
 	}
@@ -49,75 +128,46 @@ func TestRead(t *testing.T) {
 	if err != nil {
 		t.Fatal("Close /dev/null:", err)
 	}
+}
 
-	mkfifo(t)
-
-	sysfd_r, err := syscall.Open(fifo, o_RO, o_MODE)
+func TestOpen(t *testing.T) {
+	mkFifo(t, 0)
+	fdr := openFifo(t, 0, true)
+	fdw := openFifo(t, 0, false)
+	if fdr == nil {
+		t.Fatal("fdr is nil!")
+	}
+	if fdw == nil {
+		t.Fatal("fdw is nil!")
+	}
+	if fdM.GetFD(fdr.id) != fdr {
+		t.Fatal("fdr not in fdMap!")
+	}
+	if fdM.GetFD(fdw.id) != fdw {
+		t.Fatal("fdw not in fdMap!")
+	}
+	err := fdr.Close()
 	if err != nil {
-		t.Fatal("Open fifo R:", err)
+		t.Fatal("Close fdr:", err)
 	}
-	sysfd_w, err := syscall.Open(fifo, o_WO, o_MODE)
+	err = fdw.Close()
 	if err != nil {
-		t.Fatal("Open fifo W:", err)
+		t.Fatal("Close fdw:", err)
 	}
-
-	fdr, err := NewFD(sysfd_r)
-	if err != nil {
-		t.Fatal("NewFD fifo R:", err)
+	if fdM.GetFD(fdr.id) != nil {
+		t.Fatal("fdr still in fdMap!")
 	}
-	fdw, err := NewFD(sysfd_w)
-	if err != nil {
-		t.Fatal("NewFD fifo W:", err)
+	if fdM.GetFD(fdw.id) != nil {
+		t.Fatal("fdw still in fdMap!")
 	}
+}
 
-	read := func(s string) {
-		b := make([]byte, len(s))
-		n, err := fdr.Read(b)
-		if err != nil {
-			t.Fatal("Read:", err)
-		}
-		if n != len(s) {
-			t.Fatalf("Read %d != %d", n, len(s))
-		}
-		if string(b) != s {
-			t.Fatalf("Read \"%s\" != \"%s\"", string(b), s)
-		}
-	}
+func TestClose(t *testing.T) {
+	mkFifo(t, 0)
+	fdr := openFifo(t, 0, true)
+	fdw := openFifo(t, 0, false)
 
-	write := func(s string) {
-		n, err := fdw.Write([]byte(s))
-		if err != nil {
-			t.Fatal("Write:", err)
-		}
-		if n != len(s) {
-			t.Fatalf("Write %d != %d", n, len(s))
-		}
-	}
-
-	end := make(chan bool)
-
-	go func() { read("0123"); end <- true }()
-	go func() { read("0123"); end <- true }()
-	time.Sleep(100 * time.Millisecond)
-	go func() { write("01230123"); end <- true }()
-	<-end
-	<-end
-	<-end
-
-	go func() { read("0123"); end <- true }()
-	go func() { read("0123"); end <- true }()
-	go func() {
-		time.Sleep(100 * time.Millisecond)
-		write("0123")
-		time.Sleep(100 * time.Millisecond)
-		write("0123")
-		end <- true
-	}()
-	<-end
-	<-end
-	<-end
-
-	slamed := func() {
+	clread := func() {
 		b := make([]byte, 4)
 		n, err := fdr.Read(b)
 		if err != ErrClosed {
@@ -128,20 +178,116 @@ func TestRead(t *testing.T) {
 		}
 	}
 
-	go func() { slamed(); end <- true }()
-	go func() { slamed(); end <- true }()
-	go func() { slamed(); end <- true }()
+	clwrite := func() {
+		// must fill write buffer
+		b := make([]byte, 1024*1024)
+		n, err := fdw.Write(b)
+		if err != ErrClosed {
+			t.Fatal("Write:", err)
+		}
+		if n >= len(b) {
+			t.Fatalf("Write n >= %d: %d", len(b), n)
+		}
+	}
+
+	end := make(chan bool)
+	b := make([]byte, 1)
+
+	go func() { clread(); end <- true }()
+	go func() { clread(); end <- true }()
+	go func() { clread(); end <- true }()
 	time.Sleep(100 * time.Millisecond)
+	err := fdr.Close()
+	if err != nil {
+		t.Fatal("Close R:", err)
+	}
+	waitN(t, end, 3)
+
+	err = fdr.Close()
+	if err != ErrClosed {
+		t.Fatal("Close R:", err)
+	}
+	_, err = fdr.Read(b)
+	if err != ErrClosed {
+		t.Fatal("Read R:", err)
+	}
+
+	debug("--------")
+
+	fdr = openFifo(t, 0, true)
+
+	go func() { clwrite(); end <- true }()
+	go func() { clwrite(); end <- true }()
+	go func() { clwrite(); end <- true }()
+	go func() { clwrite(); end <- true }()
+	time.Sleep(100 * time.Millisecond)
+	err = fdw.Close()
+	if err != nil {
+		t.Fatal("Close W:", err)
+	}
+	waitN(t, end, 4)
+
+	err = fdw.Close()
+	if err != ErrClosed {
+		t.Fatal("Close W:", err)
+	}
+	_, err = fdw.Write(b)
+	if err != ErrClosed {
+		t.Fatal("Write W:", err)
+	}
+
+	debug("--------")
+
+	go func() {
+		b := make([]byte, 64*1024)
+		for {
+			_, err := fdr.Read(b)
+			if err != nil {
+				if err == io.EOF {
+					break
+				}
+				t.Fatal("Read R:", err)
+			}
+		}
+		end <- true
+	}()
+	waitN(t, end, 1)
+
 	err = fdr.Close()
 	if err != nil {
 		t.Fatal("Close R:", err)
 	}
-	<-end
-	<-end
-	<-end
+}
 
-	err = fdr.Close()
-	if err != ErrClosed {
+func TestRead(t *testing.T) {
+	mkFifo(t, 0)
+	fdr := openFifo(t, 0, true)
+	fdw := openFifo(t, 0, false)
+
+	end := make(chan bool)
+
+	go func() { readStr(t, fdr, "0123"); end <- true }()
+	go func() { readStr(t, fdr, "0123"); end <- true }()
+	time.Sleep(100 * time.Millisecond)
+	go func() { writeStr(t, fdw, "01230123"); end <- true }()
+	waitN(t, end, 3)
+
+	debug("--------")
+
+	go func() { readStr(t, fdr, "0123"); end <- true }()
+	go func() { readStr(t, fdr, "0123"); end <- true }()
+	go func() { readStr(t, fdr, "0123"); end <- true }()
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		writeStr(t, fdw, "0123")
+		time.Sleep(100 * time.Millisecond)
+		writeStr(t, fdw, "01230123")
+		end <- true
+	}()
+	waitN(t, end, 4)
+
+	err := fdr.Close()
+	if err != nil {
 		t.Fatal("Close R:", err)
 	}
 
@@ -151,96 +297,149 @@ func TestRead(t *testing.T) {
 	}
 }
 
-type ioFunc func([]byte) (int, error)
-
-func blocker(t *testing.T, io ioFunc, n, bs int, dly time.Duration) {
-	b := make([]byte, bs)
-	for i := 0; i < n; i++ {
-		nn := 0
-		for {
-			n, err := io(b[nn:])
-			if err != nil {
-				t.Fatal("Blocker:", err)
-			}
-			nn += n
-			if nn == bs {
-				break
-			}
-		}
-		if dly != 0 {
-			time.Sleep(dly)
-		}
-	}
-}
-
 func TestWrite(t *testing.T) {
-	mkfifo(t)
-
-	sysfd_r, err := syscall.Open(fifo, o_RO, o_MODE)
-	if err != nil {
-		t.Fatal("Open fifo R:", err)
-	}
-	sysfd_w, err := syscall.Open(fifo, o_WO, o_MODE)
-	if err != nil {
-		t.Fatal("Open fifo W:", err)
-	}
-
-	fdr, err := NewFD(sysfd_r)
-	if err != nil {
-		t.Fatal("NewFD fifo R:", err)
-	}
-	fdw, err := NewFD(sysfd_w)
-	if err != nil {
-		t.Fatal("NewFD fifo W:", err)
-	}
+	mkFifo(t, 0)
+	fdr := openFifo(t, 0, true)
+	fdw := openFifo(t, 0, false)
 
 	end := make(chan bool)
 
 	go func() {
-		blocker(t, fdw.Write, 20, 4096, 0)
+		writeBlock(t, fdw, 1, 512*1024, 0)
 		end <- true
 	}()
-
 	go func() {
-		// Give writer headstart
-		time.Sleep(1 * time.Second)
-		blocker(t, fdr.Read, 40, 2048, 100*time.Millisecond)
+		// Give writer some headstart
+		time.Sleep(100 * time.Millisecond)
+		readBlock(t, fdr, 512, 1024, 0)
 		end <- true
 	}()
+	waitN(t, end, 2)
 
-	tmo := time.After(15 * time.Second)
-	select {
-	case <-end:
-	case <-tmo:
-		t.Fatal("Timeout!")
-	}
-	select {
-	case <-end:
-	case <-tmo:
-		t.Fatal("Timeout!")
-	}
+	debug("--------")
 
+	for i := 0; i < 4; i++ {
+		go func() {
+			writeBlock(t, fdw, 128, 1024, 10*time.Millisecond)
+			end <- true
+		}()
+	}
 	go func() {
-		blocker(t, fdw.Write, 1000, 10240, 0)
+		// Give writers some headstart
+		time.Sleep(100 * time.Millisecond)
+		readBlock(t, fdr, 1, 512*1024, 0)
 		end <- true
 	}()
+	waitN(t, end, 4)
 
+	debug("--------")
+
+	for i := 0; i < 4; i++ {
+		go func() {
+			writeBlock(t, fdw, 128, 1024, 10*time.Millisecond)
+			end <- true
+		}()
+	}
+	for i := 0; i < 4; i++ {
+		go func() {
+			readBlock(t, fdr, 256, 512, 0)
+			end <- true
+		}()
+	}
+	waitN(t, end, 8)
+
+	err := fdw.Close()
+	if err != nil {
+		t.Fatal("Close W:", err)
+	}
+	err = fdr.Close()
+	if err != nil {
+		t.Fatal("Close R:", err)
+	}
+}
+
+func TestDeadlines(t *testing.T) {
+	mkFifo(t, 0)
+	fdr := openFifo(t, 0, true)
+	fdw := openFifo(t, 0, false)
+
+	_ = fdw
+	end := make(chan bool)
+
+	err := fdr.SetReadDeadline(time.Now().Add(1 * time.Millisecond))
+	if err != nil {
+		t.Fatal("SetReadDeadline:", err)
+	}
 	go func() {
-		blocker(t, fdr.Read, 5000, 2048, 0)
+		b := make([]byte, 1)
+		_, err = fdr.Read(b)
+		if err != ErrTimeout {
+			t.Fatal("Read:", err)
+		}
+		_, err = fdr.Read(b)
+		if err != ErrTimeout {
+			t.Fatal("Read:", err)
+		}
 		end <- true
 	}()
+	waitNTmo(t, end, 1, 200*time.Millisecond)
 
-	tmo = time.After(15 * time.Second)
-	select {
-	case <-end:
-	case <-tmo:
-		t.Fatal("Timeout!")
+	_, err = fdw.Write([]byte("0123"))
+	if err != nil {
+		t.Fatal("Write:", err)
 	}
-	select {
-	case <-end:
-	case <-tmo:
-		t.Fatal("Timeout!")
+	err = fdr.SetReadDeadline(time.Now().Add(1 * time.Millisecond))
+	if err != nil {
+		t.Fatal("SetReadDeadline:", err)
 	}
+	time.Sleep(2 * time.Millisecond)
+	go func() {
+		b := make([]byte, 1)
+		_, err = fdr.Read(b)
+		if err != ErrTimeout {
+			t.Fatal("Read:", err)
+		}
+		end <- true
+	}()
+	waitNTmo(t, end, 1, 200*time.Millisecond)
+
+	err = fdr.SetDeadline(time.Now().Add(100 * time.Millisecond))
+	if err != nil {
+		t.Fatal("SetDeadline:", err)
+	}
+	go func() {
+		b := make([]byte, 4)
+		_, err = fdr.Read(b)
+		if err != nil {
+			t.Fatal("Read:", err)
+		}
+		end <- true
+	}()
+	waitNTmo(t, end, 1, 200*time.Millisecond)
+	err = fdr.SetDeadline(time.Time{})
+	if err != nil {
+		t.Fatal("SetDeadline:", err)
+	}
+
+	err = fdw.SetWriteDeadline(time.Now().Add(200 * time.Millisecond))
+	if err != nil {
+		t.Fatal("SetWriteDeadline:", err)
+	}
+	go func() {
+		b := make([]byte, 4096)
+		var err error
+		for {
+			_, err = fdw.Write(b)
+			if err != nil {
+				break
+			}
+		}
+		if err != ErrTimeout {
+			t.Fatal("Write:", err)
+		}
+		end <- true
+	}()
+	waitNTmo(t, end, 1, 500*time.Millisecond)
 
 	err = fdw.Close()
 	if err != nil {
