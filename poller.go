@@ -332,7 +332,7 @@ func (fd *FD) Write(p []byte) (nn int, err error) {
 
 */
 
-// Closes the file descriptor. It is ok to call Close concurently with
+// Close the file descriptor. It is ok to call Close concurently with
 // other operations (Read, Write, SetDeadline, etc) on the same
 // file-descriptor. In this case ongoing operations will return with
 // ErrClosed. Any subsequent operations (after Close) on the
