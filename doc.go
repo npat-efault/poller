@@ -6,7 +6,7 @@ file-descriptors without allocating one OS thread for every blocked
 operation. It behaves similarly to Go's netpoller (which multiplexes
 network connections) without requiring special support from the Go
 runtime. It can be used with tty devices, character devices, pipes,
-FIFOs, and any Unix file-descriptor that is poll(7)-able. In addition
+FIFOs, and any Unix file-descriptor that is epoll(7)-able. In addition
 it allows the user to set timeouts (deadlines) for read and write
 operations.
 
