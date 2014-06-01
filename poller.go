@@ -57,7 +57,7 @@ func (fdm *fdMap) DelFD(id int) {
 
 // FD is a poller file-descriptor. Typically a file-descriptor
 // connected to a terminal, a pseudo terminal, a character device, a
-// FIFO (named pipe), of any unix stream that supports the epoll(7)
+// FIFO (named pipe), or any unix stream that supports the epoll(7)
 // interface.
 type FD struct {
 	id    int // Key in fdMap[]
