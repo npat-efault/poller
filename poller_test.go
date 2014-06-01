@@ -3,6 +3,7 @@ package poller
 import (
 	"fmt"
 	"io"
+	"runtime"
 	"syscall"
 	"testing"
 	"time"
@@ -37,53 +38,64 @@ func openFifo(t *testing.T, i int, read bool) *FD {
 	return fd
 }
 
-func waitNTmo(t *testing.T, ch <-chan bool, n int, d time.Duration) {
+func waitNTmo_(t *testing.T, ch <-chan error, n int, d time.Duration) {
 	tmo := time.After(d)
 	for i := 0; i < n; i++ {
 		select {
-		case <-ch:
+		case err := <-ch:
+			if err != nil {
+				_, _, line, _ := runtime.Caller(2)
+				t.Fatalf("%d: %v", line, err)
+			}
 		case <-tmo:
-			t.Fatal("Timeout!")
+			_, _, line, _ := runtime.Caller(2)
+			t.Fatalf("%d: Timeout!", line)
 		}
 	}
 }
 
-func waitN(t *testing.T, ch <-chan bool, n int) {
-	waitNTmo(t, ch, n, 15*time.Second)
+func waitN(t *testing.T, ch <-chan error, n int) {
+	waitNTmo_(t, ch, n, 15*time.Second)
 }
 
-func readStr(t *testing.T, fd *FD, s string) {
+func waitNTmo(t *testing.T, ch <-chan error, n int, d time.Duration) {
+	waitNTmo_(t, ch, n, d)
+}
+
+func readStr(fd *FD, s string) error {
 	b := make([]byte, len(s))
 	n, err := fd.Read(b)
 	if err != nil {
-		t.Fatal("Read:", err)
+		return fmt.Errorf("Read: %v", err)
 	}
 	if n != len(s) {
-		t.Fatalf("Read %d != %d", n, len(s))
+		return fmt.Errorf("Read %d != %d", n, len(s))
 	}
 	if string(b) != s {
-		t.Fatalf("Read \"%s\" != \"%s\"", string(b), s)
+		return fmt.Errorf("Read \"%s\" != \"%s\"", string(b), s)
 	}
+	return nil
 }
 
-func writeStr(t *testing.T, fd *FD, s string) {
+func writeStr(fd *FD, s string) error {
 	n, err := fd.Write([]byte(s))
 	if err != nil {
-		t.Fatal("Write:", err)
+		return fmt.Errorf("Write: %v", err)
 	}
 	if n != len(s) {
-		t.Fatalf("Write %d != %d", n, len(s))
+		return fmt.Errorf("Write %d != %d", n, len(s))
 	}
+	return nil
 }
 
-func readBlock(t *testing.T, fd *FD, n, bs int, dly time.Duration) {
+func readBlock(fd *FD, n, bs int, dly time.Duration) error {
 	b := make([]byte, bs)
 	for i := 0; i < n; i++ {
 		nn := 0
 		for {
 			n, err := fd.Read(b[nn:])
 			if err != nil {
-				t.Fatal("readBlock:", err)
+				return fmt.Errorf("readBlock: %v", err)
 			}
 			nn += n
 			if nn == bs {
@@ -94,22 +106,24 @@ func readBlock(t *testing.T, fd *FD, n, bs int, dly time.Duration) {
 			time.Sleep(dly)
 		}
 	}
+	return nil
 }
 
-func writeBlock(t *testing.T, fd *FD, n, bs int, dly time.Duration) {
+func writeBlock(fd *FD, n, bs int, dly time.Duration) error {
 	b := make([]byte, bs)
 	for i := 0; i < n; i++ {
 		nn, err := fd.Write(b)
 		if err != nil {
-			t.Fatal("writeBlock:", err)
+			return fmt.Errorf("writeBlock: %v", err)
 		}
 		if nn != bs {
-			t.Fatalf("writeBlock %d != %d", nn, bs)
+			return fmt.Errorf("writeBlock %d != %d", nn, bs)
 		}
 		if dly != 0 {
 			time.Sleep(dly)
 		}
 	}
+	return nil
 }
 
 func TestNewFDFail(t *testing.T) {
@@ -167,35 +181,37 @@ func TestClose(t *testing.T) {
 	fdr := openFifo(t, 0, true)
 	fdw := openFifo(t, 0, false)
 
-	clread := func() {
+	clread := func() error {
 		b := make([]byte, 4)
 		n, err := fdr.Read(b)
 		if err != ErrClosed {
-			t.Fatal("Read:", err)
+			return fmt.Errorf("Read: %v", err)
 		}
 		if n != 0 {
-			t.Fatal("Read n != 0:", n)
+			return fmt.Errorf("Read n != 0: %d", n)
 		}
+		return nil
 	}
 
-	clwrite := func() {
+	clwrite := func() error {
 		// must fill write buffer
 		b := make([]byte, 1024*1024)
 		n, err := fdw.Write(b)
 		if err != ErrClosed {
-			t.Fatal("Write:", err)
+			return fmt.Errorf("Write: %v", err)
 		}
 		if n >= len(b) {
-			t.Fatalf("Write n >= %d: %d", len(b), n)
+			return fmt.Errorf("Write n >= %d: %d", len(b), n)
 		}
+		return nil
 	}
 
-	end := make(chan bool)
+	end := make(chan error)
 	b := make([]byte, 1)
 
-	go func() { clread(); end <- true }()
-	go func() { clread(); end <- true }()
-	go func() { clread(); end <- true }()
+	go func() { end <- clread() }()
+	go func() { end <- clread() }()
+	go func() { end <- clread() }()
 	time.Sleep(100 * time.Millisecond)
 	err := fdr.Close()
 	if err != nil {
@@ -216,10 +232,10 @@ func TestClose(t *testing.T) {
 
 	fdr = openFifo(t, 0, true)
 
-	go func() { clwrite(); end <- true }()
-	go func() { clwrite(); end <- true }()
-	go func() { clwrite(); end <- true }()
-	go func() { clwrite(); end <- true }()
+	go func() { end <- clwrite() }()
+	go func() { end <- clwrite() }()
+	go func() { end <- clwrite() }()
+	go func() { end <- clwrite() }()
 	time.Sleep(100 * time.Millisecond)
 	err = fdw.Close()
 	if err != nil {
@@ -246,10 +262,11 @@ func TestClose(t *testing.T) {
 				if err == io.EOF {
 					break
 				}
-				t.Fatal("Read R:", err)
+				end <- fmt.Errorf("Read R: %v", err)
+				return
 			}
 		}
-		end <- true
+		end <- nil
 	}()
 	waitN(t, end, 1)
 
@@ -264,25 +281,31 @@ func TestRead(t *testing.T) {
 	fdr := openFifo(t, 0, true)
 	fdw := openFifo(t, 0, false)
 
-	end := make(chan bool)
+	end := make(chan error)
 
-	go func() { readStr(t, fdr, "0123"); end <- true }()
-	go func() { readStr(t, fdr, "0123"); end <- true }()
+	go func() { end <- readStr(fdr, "0123") }()
+	go func() { end <- readStr(fdr, "0123") }()
 	time.Sleep(100 * time.Millisecond)
-	go func() { writeStr(t, fdw, "01230123"); end <- true }()
+	go func() { end <- writeStr(fdw, "01230123") }()
 	waitN(t, end, 3)
 
 	debug("--------")
 
-	go func() { readStr(t, fdr, "0123"); end <- true }()
-	go func() { readStr(t, fdr, "0123"); end <- true }()
-	go func() { readStr(t, fdr, "0123"); end <- true }()
+	go func() { end <- readStr(fdr, "0123") }()
+	go func() { end <- readStr(fdr, "0123") }()
+	go func() { end <- readStr(fdr, "0123") }()
 	go func() {
 		time.Sleep(100 * time.Millisecond)
-		writeStr(t, fdw, "0123")
+		if err := writeStr(fdw, "0123"); err != nil {
+			end <- err
+			return
+		}
 		time.Sleep(100 * time.Millisecond)
-		writeStr(t, fdw, "01230123")
-		end <- true
+		if err := writeStr(fdw, "01230123"); err != nil {
+			end <- err
+			return
+		}
+		end <- nil
 	}()
 	waitN(t, end, 4)
 
@@ -302,17 +325,13 @@ func TestWrite(t *testing.T) {
 	fdr := openFifo(t, 0, true)
 	fdw := openFifo(t, 0, false)
 
-	end := make(chan bool)
+	end := make(chan error)
 
-	go func() {
-		writeBlock(t, fdw, 1, 512*1024, 0)
-		end <- true
-	}()
+	go func() { end <- writeBlock(fdw, 1, 512*1024, 0) }()
 	go func() {
 		// Give writer some headstart
 		time.Sleep(100 * time.Millisecond)
-		readBlock(t, fdr, 512, 1024, 0)
-		end <- true
+		end <- readBlock(fdr, 512, 1024, 0)
 	}()
 	waitN(t, end, 2)
 
@@ -320,15 +339,14 @@ func TestWrite(t *testing.T) {
 
 	for i := 0; i < 4; i++ {
 		go func() {
-			writeBlock(t, fdw, 128, 1024, 10*time.Millisecond)
-			end <- true
+			end <- writeBlock(fdw, 128, 1024,
+				10*time.Millisecond)
 		}()
 	}
 	go func() {
 		// Give writers some headstart
 		time.Sleep(100 * time.Millisecond)
-		readBlock(t, fdr, 1, 512*1024, 0)
-		end <- true
+		end <- readBlock(fdr, 1, 512*1024, 0)
 	}()
 	waitN(t, end, 4)
 
@@ -336,14 +354,13 @@ func TestWrite(t *testing.T) {
 
 	for i := 0; i < 4; i++ {
 		go func() {
-			writeBlock(t, fdw, 128, 1024, 10*time.Millisecond)
-			end <- true
+			end <- writeBlock(fdw, 128, 1024,
+				10*time.Millisecond)
 		}()
 	}
 	for i := 0; i < 4; i++ {
 		go func() {
-			readBlock(t, fdr, 256, 512, 0)
-			end <- true
+			end <- readBlock(fdr, 256, 512, 0)
 		}()
 	}
 	waitN(t, end, 8)
@@ -363,8 +380,7 @@ func TestDeadlines(t *testing.T) {
 	fdr := openFifo(t, 0, true)
 	fdw := openFifo(t, 0, false)
 
-	_ = fdw
-	end := make(chan bool)
+	end := make(chan error)
 
 	err := fdr.SetReadDeadline(time.Now().Add(1 * time.Millisecond))
 	if err != nil {
@@ -374,13 +390,15 @@ func TestDeadlines(t *testing.T) {
 		b := make([]byte, 1)
 		_, err = fdr.Read(b)
 		if err != ErrTimeout {
-			t.Fatal("Read:", err)
+			end <- fmt.Errorf("Read: %v", err)
+			return
 		}
 		_, err = fdr.Read(b)
 		if err != ErrTimeout {
-			t.Fatal("Read:", err)
+			end <- fmt.Errorf("Read: %v", err)
+			return
 		}
-		end <- true
+		end <- nil
 	}()
 	waitNTmo(t, end, 1, 200*time.Millisecond)
 
@@ -397,9 +415,10 @@ func TestDeadlines(t *testing.T) {
 		b := make([]byte, 1)
 		_, err = fdr.Read(b)
 		if err != ErrTimeout {
-			t.Fatal("Read:", err)
+			end <- fmt.Errorf("Read: %v", err)
+			return
 		}
-		end <- true
+		end <- nil
 	}()
 	waitNTmo(t, end, 1, 200*time.Millisecond)
 
@@ -411,9 +430,10 @@ func TestDeadlines(t *testing.T) {
 		b := make([]byte, 4)
 		_, err = fdr.Read(b)
 		if err != nil {
-			t.Fatal("Read:", err)
+			end <- fmt.Errorf("Read: %v", err)
+			return
 		}
-		end <- true
+		end <- nil
 	}()
 	waitNTmo(t, end, 1, 200*time.Millisecond)
 	err = fdr.SetDeadline(time.Time{})
@@ -435,9 +455,10 @@ func TestDeadlines(t *testing.T) {
 			}
 		}
 		if err != ErrTimeout {
-			t.Fatal("Write:", err)
+			end <- fmt.Errorf("Write: %v", err)
+			return
 		}
-		end <- true
+		end <- nil
 	}()
 	waitNTmo(t, end, 1, 500*time.Millisecond)
 
