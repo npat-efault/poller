@@ -296,7 +296,7 @@ func (fd *FD) write1(p []byte) (n int, err error) {
 //
 //     func (fd *myFD) Write(p []byte) (n int, err error) {
 //         fd.mu.Lock()
-//         n, err = fd.FD.Write(p)
+//         n, err := fd.FD.Write(p)
 //         fd.mu.Unlock()
 //         return n, err
 //     }
