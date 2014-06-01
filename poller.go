@@ -392,6 +392,9 @@ func (fd *FD) SetDeadline(t time.Time) error {
 	return fd.SetWriteDeadline(t)
 }
 
+// TODO(npat): If deadline is not After(time.Now()) wake-up goroutines
+// imediatelly; don't go through the timer callback
+
 // SetReadDeadline sets the deadline for Read operations on the
 // file-descriptor.
 func (fd *FD) SetReadDeadline(t time.Time) error {
@@ -604,6 +607,8 @@ const debug_enable = false
 
 var fdM fdMap
 var epfd int = -1
+
+// TODO(npat): Support systems that don't have EpollCreate1
 
 func init() {
 	fdM.Init(128)
