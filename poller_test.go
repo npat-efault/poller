@@ -10,7 +10,7 @@ import (
 )
 
 // !! ATTENTION !! We unconditionally delete files named like this !!
-const fifo = "/tmp/poller-test-fifo" // /tmp/poler-test-fifoXXX
+const fifo = "/tmp/poller-test-fifo" // /tmp/poller-test-fifoXXX
 
 func fifoName(i int) string {
 	return fifo + fmt.Sprintf("%03d", i)
@@ -228,7 +228,7 @@ func TestClose(t *testing.T) {
 		t.Fatal("Read R:", err)
 	}
 
-	debug("--------")
+	debugf("--------")
 
 	fdr = openFifo(t, 0, true)
 
@@ -252,7 +252,7 @@ func TestClose(t *testing.T) {
 		t.Fatal("Write W:", err)
 	}
 
-	debug("--------")
+	debugf("--------")
 
 	go func() {
 		b := make([]byte, 64*1024)
@@ -289,7 +289,7 @@ func TestRead(t *testing.T) {
 	go func() { end <- writeStr(fdw, "01230123") }()
 	waitN(t, end, 3)
 
-	debug("--------")
+	debugf("--------")
 
 	go func() { end <- readStr(fdr, "0123") }()
 	go func() { end <- readStr(fdr, "0123") }()
@@ -335,7 +335,7 @@ func TestWrite(t *testing.T) {
 	}()
 	waitN(t, end, 2)
 
-	debug("--------")
+	debugf("--------")
 
 	for i := 0; i < 4; i++ {
 		go func() {
@@ -350,7 +350,7 @@ func TestWrite(t *testing.T) {
 	}()
 	waitN(t, end, 4)
 
-	debug("--------")
+	debugf("--------")
 
 	for i := 0; i < 4; i++ {
 		go func() {

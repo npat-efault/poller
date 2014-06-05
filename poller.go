@@ -1,6 +1,7 @@
 package poller
 
 import (
+	"fmt"
 	"io"
 	"log"
 	"sync"
@@ -55,25 +56,31 @@ func (fdm *fdMap) DelFD(id int) {
 	fdm.mu.Unlock()
 }
 
+// fdCtl keeps control fields (locks, timers, etc) for a single
+// direction. For every FD there is one fdCtl for Read operations and
+// another for Write operations.
+type fdCtl struct {
+	mu       sync.Mutex
+	cond     *sync.Cond
+	deadline time.Time
+	timer    *time.Timer
+	timeout  bool
+}
+
 // FD is a poller file-descriptor. Typically a file-descriptor
 // connected to a terminal, a pseudo terminal, a character device, a
 // FIFO (named pipe), or any unix stream that supports the epoll(7)
 // interface.
 type FD struct {
-	id    int // Key in fdMap[]
-	sysfd int // Unix file descriptor
+	id int // Key in fdMap[] (immutable)
 
-	closed bool       // Set by Close(), never cleared
-	rmu    sync.Mutex // Mutex and condition for Read ops
-	rco    *sync.Cond
-	rtm    *time.Timer // Read timer
-	rdl    time.Time   // Read deadline
-	rto    bool        // Read timeout occured
-	wmu    sync.Mutex  // Mutex and condition for Write ops
-	wco    *sync.Cond
-	wtm    *time.Timer // Write timer
-	wdl    time.Time   // Write deadline
-	wto    bool        // Write timeout occured
+	// Must hold both R and W locks to set
+	sysfd  int  // Unix file descriptor
+	closed bool // Set by Close(), never cleared
+
+	// Must hold respective lock to access
+	r fdCtl // Control fields for Read operations
+	w fdCtl // Control fields for Write operations
 }
 
 // TODO(npat): Add finalizer
@@ -87,14 +94,14 @@ func NewFD(sysfd int) (*FD, error) {
 	// Set sysfd to non-blocking mode
 	err := syscall.SetNonblock(sysfd, true)
 	if err != nil {
-		debug("FD xxx: NF: sysfd=%d, err=%v", sysfd, err)
+		debugf("FD xxx: NF: sysfd=%d, err=%v", sysfd, err)
 		return nil, err
 	}
 	// Initialize FD
 	fd := &FD{sysfd: sysfd}
 	fd.id = fdM.GetID()
-	fd.rco = sync.NewCond(&fd.rmu)
-	fd.wco = sync.NewCond(&fd.wmu)
+	fd.r.cond = sync.NewCond(&fd.r.mu)
+	fd.w.cond = sync.NewCond(&fd.w.mu)
 	// Add to Epoll set. We may imediatelly start receiving events
 	// after this. They will be dropped since the FD is not yet in
 	// fdMap. It's ok. Nobody is waiting on this FD yet, anyway.
@@ -106,12 +113,12 @@ func NewFD(sysfd int) (*FD, error) {
 		Fd: int32(fd.id)}
 	err = syscall.EpollCtl(epfd, syscall.EPOLL_CTL_ADD, fd.sysfd, &ev)
 	if err != nil {
-		debug("FD %03d: NF: sysfd=%d, err=%v", fd.id, fd.sysfd, err)
+		debugf("FD %03d: NF: sysfd=%d, err=%v", fd.id, fd.sysfd, err)
 		return nil, err
 	}
 	// Add to fdMap
 	fdM.AddFD(fd)
-	debug("FD %03d: NF: sysfd=%d", fd.id, fd.sysfd)
+	debugf("FD %03d: NF: sysfd=%d", fd.id, fd.sysfd)
 	return fd, nil
 }
 
@@ -142,38 +149,7 @@ func Open(name string, flags int) (*FD, error) {
 	return NewFD(sysfd)
 }
 
-/*
-
-- We use Edge Triggered notifications so we can only sleep (cond.Wait)
-  when the syscall (Read/Write) returns with EAGAIN
-
-- While sleeping we don't have the lock. We re-acquire it immediatelly
-  after waking-up (cond.Wait does). After waking up we must re-check
-  the "closed" and "tmo" conditions. It is also possible that after
-  waking up the syscall (Read/Write) returns EAGAIN again (because
-  another goroutine might have stepped in front of us, before
-  we re-acquire the lock, and read the data or written to the buffer
-  before we do).
-
-- The following can wake us: A read or write event from EpollWait. A
-  call to Close (sets fd.closed = 1). The expiration of a timer /
-  deadline (sets fd.r/wto = 1). Read and write events wake-up a single
-  goroutine waiting on the FD (cond.Signal). Closes and timeouts
-  wake-up all goroutines waiting on the FD (cond.Broadcast).
-
-- The Read/write1 methods must wake-up the next goroutine (possibly)
-  waiting on the FD, in the following cases: (a) When a Read/Write
-  syscall error (incl. zero-bytes return) is detected, and (b) When
-  they successfully read/write *all* the requested data.
-
-- The Read and Write methods implement the io.Reader and io.Writer
-  interfaces respectivelly. There is an asymetry between these
-  interfaces: io.Readers are allowed to read less than requested,
-  without signaling an error. io.Writers are *not*. The write1 method
-  is exactly symmetrical with Read (issues only one system call and
-  can write less than requested). Write wraps write1.
-
-*/
+// TODO(npat): Add FromFile function?
 
 // Read up to len(p) bytes into p. Returns the number of bytes read (0
 // <= n <= len(p)) and any error encountered. If some data is
@@ -185,91 +161,7 @@ func Open(name string, flags int) (*FD, error) {
 // ErrTimeout (and n == 0). If the read(2) system-call returns 0, Read
 // returns with err = io.EOF (and n == 0).
 func (fd *FD) Read(p []byte) (n int, err error) {
-	fd.rco.L.Lock()
-	defer fd.rco.L.Unlock()
-	for {
-		if fd.closed {
-			debug("FD %03d: RD: Closed", fd.id)
-			return 0, ErrClosed
-		}
-		if fd.rto {
-			debug("FD %03d: RD: Timeout", fd.id)
-			return 0, ErrTimeout
-		}
-		n, err = syscall.Read(fd.sysfd, p)
-		debug("FD %03d: RD: sysfd=%d n=%d, err=%v",
-			fd.id, fd.sysfd, n, err)
-		if err != nil {
-			n = 0
-			if err != syscall.EAGAIN {
-				// I/O error. Wake-up next.
-				fd.rco.Signal()
-				break
-			}
-			// EAGAIN
-			debug("FD %03d: RD: Wait", fd.id)
-			fd.rco.Wait()
-			debug("FD %03d: RD: Wakeup", fd.id)
-			continue
-		}
-		if n == 0 && len(p) != 0 {
-			// Remote end closed. Wake-up next.
-			fd.rco.Signal()
-			err = io.EOF
-			break
-		}
-		// Successful read
-		if n == len(p) {
-			// Read all we asked. Wake-up next.
-			fd.rco.Signal()
-		}
-		break
-	}
-	return n, err
-}
-
-func (fd *FD) write1(p []byte) (n int, err error) {
-	fd.wco.L.Lock()
-	defer fd.wco.L.Unlock()
-	for {
-		if fd.closed {
-			debug("FD %03d: WR: Closed", fd.id)
-			return 0, ErrClosed
-		}
-		if fd.wto {
-			debug("FD %03d: WR: Timeout", fd.id)
-			return 0, ErrTimeout
-		}
-		n, err = syscall.Write(fd.sysfd, p)
-		debug("FD %03d: WR: sysfd=%d n=%d, err=%v",
-			fd.id, fd.sysfd, n, err)
-		if err != nil {
-			n = 0
-			if err != syscall.EAGAIN {
-				// I/O error. Wake-up next.
-				fd.wco.Signal()
-				break
-			}
-			// EAGAIN
-			debug("FD %03d: WR: Wait", fd.id)
-			fd.wco.Wait()
-			debug("FD %03d: WR: Wakeup", fd.id)
-			continue
-		}
-		if n == 0 && len(p) != 0 {
-			// Unexpected EOF error. Wake-up next.
-			fd.wco.Signal()
-			err = io.ErrUnexpectedEOF
-			break
-		}
-		// Successful write
-		if n == len(p) {
-			// Wrote all we asked. Wake-up next.
-			fd.wco.Signal()
-		}
-		break
-	}
-	return n, err
+	return fdIO(fd, false, p)
 }
 
 // Writes len(p) bytes from p to the file-descriptor.  Returns the
@@ -304,13 +196,105 @@ func (fd *FD) write1(p []byte) (n int, err error) {
 func (fd *FD) Write(p []byte) (nn int, err error) {
 	for nn != len(p) {
 		var n int
-		n, err = fd.write1(p[nn:])
+		n, err = fdIO(fd, true, p[nn:])
 		if err != nil {
 			break
 		}
 		nn += n
 	}
 	return nn, err
+}
+
+/*
+
+- We use Edge Triggered notifications so we can only sleep (cond.Wait)
+  when the syscall (Read/Write) returns with EAGAIN
+
+- While sleeping we don't have the lock. We re-acquire it immediatelly
+  after waking-up (cond.Wait does). After waking up we must re-check
+  the "closed" and "tmo" conditions. It is also possible that after
+  waking up the syscall (Read/Write) returns EAGAIN again (because
+  another goroutine might have stepped in front of us, before
+  we re-acquire the lock, and read the data or written to the buffer
+  before we do).
+
+- The following can wake us: A read or write event from EpollWait. A
+  call to Close (sets fd.closed = 1). The expiration of a timer /
+  deadline (sets fd.r/w.timeout = 1). Read and write events wake-up a
+  single goroutine waiting on the FD (cond.Signal). Closes and
+  timeouts wake-up all goroutines waiting on the FD (cond.Broadcast).
+
+- We must wake-up the next goroutine (possibly) waiting on the FD, in
+  the following cases: (a) When a Read/Write syscall error
+  (incl. zero-bytes return) is detected, and (b) When we successfully
+  read/write *all* the requested data.
+
+*/
+
+func fdIO(fd *FD, write bool, p []byte) (n int, err error) {
+	var fdc *fdCtl
+	var sysc func(int, []byte) (int, error)
+	var errEOF error
+	var dpre string
+
+	if !write {
+		// Prepare things for Read.
+		fdc = &fd.r
+		sysc = syscall.Read
+		errEOF = io.EOF
+		if debug_enable {
+			dpre = fmt.Sprintf("FD %03d: RD:", fd.id)
+		}
+	} else {
+		// Prepare things for Write.
+		fdc = &fd.w
+		sysc = syscall.Write
+		errEOF = io.ErrUnexpectedEOF
+		if debug_enable {
+			dpre = fmt.Sprintf("FD %03d: WR:", fd.id)
+		}
+	}
+	// Read & Write are identical
+	fdc.cond.L.Lock()
+	defer fdc.cond.L.Unlock()
+	for {
+		if fd.closed {
+			debugf("%s Closed", dpre)
+			return 0, ErrClosed
+		}
+		if fdc.timeout {
+			debugf("%s Timeout", dpre)
+			return 0, ErrTimeout
+		}
+		n, err = sysc(fd.sysfd, p)
+		debugf("%s sysfd=%d n=%d, err=%v", dpre, fd.sysfd, n, err)
+		if err != nil {
+			n = 0
+			if err != syscall.EAGAIN {
+				// I/O error. Wake-up next.
+				fdc.cond.Signal()
+				break
+			}
+			// EAGAIN
+			debugf("%s Wait", dpre)
+			fdc.cond.Wait()
+			debugf("%s Wakeup", dpre)
+			continue
+		}
+		if n == 0 && len(p) != 0 {
+			// Remote end closed. Wake-up next.
+			fdc.cond.Signal()
+			err = errEOF
+			break
+		}
+		// Successful syscall
+		if n == len(p) {
+			// R/W all we asked. Wake-up next.
+			fdc.cond.Signal()
+		}
+		break
+	}
+	return n, err
 }
 
 /*
@@ -341,7 +325,7 @@ func (fd *FD) Close() error {
 	// Take both locks, to exclude read and write operations from
 	// accessing a closed sysfd.
 	if err := fd.Lock(); err != nil {
-		debug("FD %03d: CL: Closed", fd.id)
+		debugf("FD %03d: CL: Closed", fd.id)
 		return err
 	}
 	defer fd.Unlock()
@@ -355,20 +339,20 @@ func (fd *FD) Close() error {
 		log.Printf("poller: EpollCtl/DEL (fd=%d, sysfd=%d): %s",
 			fd.id, fd.sysfd, err.Error())
 	}
-	if fd.rtm != nil {
-		fd.rtm.Stop()
+	if fd.r.timer != nil {
+		fd.r.timer.Stop()
 	}
-	if fd.wtm != nil {
-		fd.wtm.Stop()
+	if fd.w.timer != nil {
+		fd.w.timer.Stop()
 	}
 	fdM.DelFD(fd.id)
 	err = syscall.Close(fd.sysfd)
 
 	// Wake up everybody waiting on the FD.
-	fd.rco.Broadcast()
-	fd.wco.Broadcast()
+	fd.r.cond.Broadcast()
+	fd.w.cond.Broadcast()
 
-	debug("FD %03d: CL: close(sysfd=%d)", fd.id, fd.sysfd)
+	debugf("FD %03d: CL: close(sysfd=%d)", fd.id, fd.sysfd)
 	return err
 }
 
@@ -392,66 +376,64 @@ func (fd *FD) SetDeadline(t time.Time) error {
 	return fd.SetWriteDeadline(t)
 }
 
-// TODO(npat): If deadline is not After(time.Now()) wake-up goroutines
-// imediatelly; don't go through the timer callback
-
 // SetReadDeadline sets the deadline for Read operations on the
 // file-descriptor.
 func (fd *FD) SetReadDeadline(t time.Time) error {
-	fd.rco.L.Lock()
-	if fd.closed {
-		fd.rco.L.Unlock()
-		return ErrClosed
-	}
-	fd.rdl = t
-	fd.rto = false
-	if t.IsZero() {
-		if fd.rtm != nil {
-			fd.rtm.Stop()
-		}
-		debug("FD %03d: DR: Removed dl", fd.id)
-	} else {
-		d := t.Sub(time.Now())
-		if fd.rtm == nil {
-			id := fd.id
-			fd.rtm = time.AfterFunc(d, func() { readTmo(id) })
-		} else {
-			fd.rtm.Stop()
-			fd.rtm.Reset(d)
-		}
-		debug("FD %03d: DR: Set dl: %v", fd.id, d)
-	}
-	fd.rco.L.Unlock()
-	return nil
+	return setDeadline(fd, false, t)
 }
 
 // SetWriteDeadline sets the deadline for Write operations on the
 // file-descriptor.
 func (fd *FD) SetWriteDeadline(t time.Time) error {
-	fd.wco.L.Lock()
+	return setDeadline(fd, true, t)
+}
+
+// TODO(npat): If deadline is not After(time.Now()) wake-up goroutines
+// imediatelly; don't go through the timer callback
+
+func setDeadline(fd *FD, write bool, t time.Time) error {
+	var fdc *fdCtl
+	var dpre string
+
+	if !write {
+		// Setting read deadline
+		fdc = &fd.r
+		if debug_enable {
+			dpre = fmt.Sprintf("FD %03d: DR:", fd.id)
+		}
+	} else {
+		// Setting write deadline
+		fdc = &fd.w
+		if debug_enable {
+			dpre = fmt.Sprintf("FD %03d: DW:", fd.id)
+		}
+	}
+	// R & W deadlines are handled identically
+	fdc.cond.L.Lock()
 	if fd.closed {
-		fd.wco.L.Unlock()
+		fdc.cond.L.Unlock()
 		return ErrClosed
 	}
-	fd.wdl = t
-	fd.wto = false
+	fdc.deadline = t
+	fdc.timeout = false
 	if t.IsZero() {
-		if fd.wtm != nil {
-			fd.wtm.Stop()
+		if fdc.timer != nil {
+			fdc.timer.Stop()
 		}
-		debug("FD %03d: DW: Removed dl", fd.id)
+		debugf("%s Removed dl", dpre)
 	} else {
 		d := t.Sub(time.Now())
-		if fd.wtm == nil {
+		if fdc.timer == nil {
 			id := fd.id
-			fd.wtm = time.AfterFunc(d, func() { writeTmo(id) })
+			fdc.timer = time.AfterFunc(d,
+				func() { timerEvent(id, write) })
 		} else {
-			fd.wtm.Stop()
-			fd.wtm.Reset(d)
+			fdc.timer.Stop()
+			fdc.timer.Reset(d)
 		}
-		debug("FD %03d: DW: Set dl: %v", fd.id, d)
+		debugf("%s Set dl: %v", dpre, d)
 	}
-	fd.wco.L.Unlock()
+	fdc.cond.L.Unlock()
 	return nil
 }
 
@@ -467,11 +449,11 @@ func (fd *FD) SetWriteDeadline(t time.Time) error {
 //     ... do ioctl on fd.Sysfd() ...
 //
 func (fd *FD) Lock() error {
-	fd.rco.L.Lock()
-	fd.wco.L.Lock()
+	fd.r.cond.L.Lock()
+	fd.w.cond.L.Lock()
 	if fd.closed {
-		fd.wco.L.Unlock()
-		fd.rco.L.Unlock()
+		fd.w.cond.L.Unlock()
+		fd.r.cond.L.Unlock()
 		return ErrClosed
 	}
 	return nil
@@ -479,8 +461,8 @@ func (fd *FD) Lock() error {
 
 // Unlock unlocks the file-descriptor.
 func (fd *FD) Unlock() {
-	fd.wco.L.Unlock()
-	fd.rco.L.Unlock()
+	fd.w.cond.L.Unlock()
+	fd.r.cond.L.Unlock()
 }
 
 // Sysfd returns the system file-descriptor associated with the given
@@ -489,76 +471,75 @@ func (fd *FD) Sysfd() int {
 	return fd.sysfd
 }
 
-func readTmo(id int) {
-	fd := fdM.GetFD(int(id))
+func timerEvent(id int, write bool) {
+	var fdc *fdCtl
+	var dpre string
+
+	if debug_enable {
+		if !write {
+			dpre = fmt.Sprintf("FD %03d: TR:", id)
+		} else {
+			dpre = fmt.Sprintf("FD %03d: TW:", id)
+		}
+	}
+	fd := fdM.GetFD(id)
 	if fd == nil {
 		// Drop event. Probably stale FD.
-		debug("FD %03d: TR: Dropped", id)
+		debugf("%s Dropped", dpre)
 		return
 	}
-	fd.rco.L.Lock()
-	if !fd.rto && !fd.rdl.IsZero() && !fd.rdl.After(time.Now()) {
-		fd.rto = true
-		fd.rco.Broadcast()
-		debug("FD %03d: TR: Broadcast", fd.id)
+	if !write {
+		// A Read timeout
+		fdc = &fd.r
 	} else {
-		debug("FD %03d: TR: Ignored", fd.id)
+		// A Write timeout
+		fdc = &fd.w
 	}
-	fd.rco.L.Unlock()
+	fdc.cond.L.Lock()
+	if !fd.closed && !fdc.timeout &&
+		!fdc.deadline.IsZero() && !fdc.deadline.After(time.Now()) {
+		fdc.timeout = true
+		fdc.cond.Broadcast()
+		debugf("%s Broadcast", dpre)
+	} else {
+		debugf("%s Ignored", dpre)
+	}
+	fdc.cond.L.Unlock()
 }
 
-func writeTmo(id int) {
-	fd := fdM.GetFD(int(id))
-	if fd == nil {
-		// Drop event. Probably stale FD.
-		debug("FD %03d: TW: Dropped", id)
-		return
-	}
-	fd.wco.L.Lock()
-	if !fd.wto && !fd.wdl.IsZero() && !fd.wdl.After(time.Now()) {
-		fd.wto = true
-		fd.wco.Broadcast()
-		debug("FD %03d: TW: Broadcast", fd.id)
-	} else {
-		debug("FD %03d: TW: Ignored", fd.id)
-	}
-	fd.wco.L.Unlock()
-}
+func epollEvent(ev *syscall.EpollEvent, write bool) {
+	var fdc *fdCtl
+	var dpre string
 
-func readEvent(ev *syscall.EpollEvent) {
+	if debug_enable {
+		if !write {
+			dpre = fmt.Sprintf("FD %03d: ER:", ev.Fd)
+		} else {
+			dpre = fmt.Sprintf("FD %03d: EW:", ev.Fd)
+		}
+	}
 	fd := fdM.GetFD(int(ev.Fd))
 	if fd == nil {
 		// Drop event. Probably stale FD.
-		debug("FD %03d: ER: Dropped: 0x%x", ev.Fd, ev.Events)
+		debugf("%s Dropped: 0x%x", dpre, ev.Events)
 		return
 	}
-	fd.rco.L.Lock()
-	if !fd.closed && !fd.rto {
-		// Wake up one of the goroutines waiting on the FD.
-		fd.rco.Signal()
-		debug("FD %03d: ER: Signal: 0x%x", fd.id, ev.Events)
+	if !write {
+		// A read event
+		fdc = &fd.r
 	} else {
-		debug("FD %03d: ER: Closed | Tmo: 0x%x", fd.id, ev.Events)
+		// A write event
+		fdc = &fd.w
 	}
-	fd.rco.L.Unlock()
-}
-
-func writeEvent(ev *syscall.EpollEvent) {
-	fd := fdM.GetFD(int(ev.Fd))
-	if fd == nil {
-		// Drop event. Probably stale FD.
-		debug("FD %03d: EW: Dropped: 0x%x", ev.Fd, ev.Events)
-		return
-	}
-	fd.wco.L.Lock()
-	if !fd.closed && !fd.wto {
+	fdc.cond.L.Lock()
+	if !fd.closed && !fdc.timeout {
 		// Wake up one of the goroutines waiting on the FD.
-		fd.wco.Signal()
-		debug("FD %03d: EW: Signal: 0x%x", fd.id, ev.Events)
+		fdc.cond.Signal()
+		debugf("%s Signal: 0x%x", dpre, ev.Events)
 	} else {
-		debug("FD %03d: EW: Closed | Tmo: 0x%x", fd.id, ev.Events)
+		debugf("%s Ignored: 0x%x", dpre, ev.Events)
 	}
-	fd.wco.L.Unlock()
+	fdc.cond.L.Unlock()
 }
 
 func isReadEvent(ev *syscall.EpollEvent) bool {
@@ -575,7 +556,7 @@ func isWriteEvent(ev *syscall.EpollEvent) bool {
 }
 
 func poller() {
-	debug("Started.")
+	debugf("Started.")
 	events := make([]syscall.EpollEvent, 128)
 	for {
 		n, err := syscall.EpollWait(epfd, events, -1)
@@ -588,16 +569,16 @@ func poller() {
 		for i := 0; i < n; i++ {
 			ev := &events[i]
 			if isReadEvent(ev) {
-				readEvent(ev)
+				epollEvent(ev, false)
 			}
 			if isWriteEvent(ev) {
-				writeEvent(ev)
+				epollEvent(ev, true)
 			}
 		}
 	}
 }
 
-func debug(format string, v ...interface{}) {
+func debugf(format string, v ...interface{}) {
 	if debug_enable {
 		log.Printf("poller: "+format, v...)
 	}
