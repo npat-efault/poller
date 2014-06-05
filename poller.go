@@ -165,13 +165,13 @@ func (fd *FD) Read(p []byte) (n int, err error) {
 }
 
 // Writes len(p) bytes from p to the file-descriptor.  Returns the
-// number of bytes written (0 <= nn <= len(p)) and any error
+// number of bytes written (0 <= n <= len(p)) and any error
 // encountered that caused the write to stop early.  Write returns a
-// non-nil error if it returns nn < len(p). Write is compatible with
+// non-nil error if it returns n < len(p). Write is compatible with
 // the Write method of the io.Writer interface. In addition Write
 // honors the timeout set by (*FD).SetDeadline and
 // (*FD).SetWriteDeadline. If less than len(p) data are writen before
-// the timeout expires Write returns with err == ErrTimeout (and nn <
+// the timeout expires Write returns with err == ErrTimeout (and n <
 // len(p)). If the write(2) system-call returns 0, Write returns with
 // err == io.ErrUnexpectedEOF.
 //
