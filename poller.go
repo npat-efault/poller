@@ -193,16 +193,16 @@ func (fd *FD) Read(p []byte) (n int, err error) {
 //         return n, err
 //     }
 //
-func (fd *FD) Write(p []byte) (nn int, err error) {
-	for nn != len(p) {
-		var n int
-		n, err = fdIO(fd, true, p[nn:])
+func (fd *FD) Write(p []byte) (n int, err error) {
+	for n != len(p) {
+		var nn int
+		nn, err = fdIO(fd, true, p[n:])
 		if err != nil {
 			break
 		}
-		nn += n
+		n += nn
 	}
-	return nn, err
+	return n, err
 }
 
 /*
