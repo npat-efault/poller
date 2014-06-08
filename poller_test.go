@@ -476,5 +476,3 @@ func TestDeadlines(t *testing.T) {
 		t.Fatal("Close R:", err)
 	}
 }
-
-// TODO(npat): Add "stress" test with many FDs and many goroutines
