@@ -187,7 +187,7 @@ func (fd *FD) Read(p []byte) (n int, err error) {
 // this, you can embed FD and use a mutex to guard Write method calls:
 //
 //     struct myFD {
-//         poller.FD
+//         *poller.FD
 //         mu sync.Mutex
 //     }
 //
@@ -217,9 +217,9 @@ func (fd *FD) Write(p []byte) (n int, err error) {
 
 - While sleeping we don't have the lock. We re-acquire it immediatelly
   after waking-up (cond.Wait does). After waking up we must re-check
-  the "closed" and "tmo" conditions. It is also possible that after
-  waking up the syscall (Read/Write) returns EAGAIN again (because
-  another goroutine might have stepped in front of us, before
+  the "closed" and "timeout" conditions. It is also possible that
+  after waking up the syscall (Read/Write) returns EAGAIN again
+  (because another goroutine might have stepped in front of us, before
   we re-acquire the lock, and read the data or written to the buffer
   before we do).
 
