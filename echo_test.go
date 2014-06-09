@@ -124,15 +124,14 @@ func (m msg) Send(w io.Writer) error {
 }
 
 func rcvMsg(r io.Reader) (msg, error) {
-	m := make(msg, lenSz)
-	_, err := io.ReadFull(r, m)
+	m0 := make(msg, lenSz)
+	_, err := io.ReadFull(r, m0)
 	if err != nil {
 		return nil, err
 	}
-	l := m.Len()
-	m1 := make(msg, l)
-	copy(m1, m)
-	m = m1
+	l := m0.Len()
+	m := make(msg, l)
+	copy(m, m0)
 	_, err = io.ReadFull(r, m[lenSz:])
 	if err != nil {
 		return nil, err
