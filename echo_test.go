@@ -143,20 +143,20 @@ func sendN(r, w *poller.FD, n int) error {
 	var err error
 	for i := 0; i < n; i++ {
 		var ms, mr msg
+		ms = randMsg(uint32(i))
 		err = w.SetWriteDeadline(time.Now().Add(2 * time.Second))
 		if err != nil {
 			err = fmt.Errorf("set W dl #%d: %v", i, err)
 			break
 		}
-		err = r.SetReadDeadline(time.Now().Add(2 * time.Second))
-		if err != nil {
-			err = fmt.Errorf("set R dl #%d: %v", i, err)
-			break
-		}
-		ms = randMsg(uint32(i))
 		err = ms.Send(w)
 		if err != nil {
 			err = fmt.Errorf("cannot send #%d: %v", i, err)
+			break
+		}
+		err = r.SetReadDeadline(time.Now().Add(2 * time.Second))
+		if err != nil {
+			err = fmt.Errorf("set R dl #%d: %v", i, err)
 			break
 		}
 		mr, err = rcvMsg(r)
