@@ -37,7 +37,7 @@ if err != nil {
 b := make([]byte, 10)
 n, err := fd.Read(b)
 if err != nil {
-    log.Fatal("Write failed:", err)
+    log.Fatal("Read failed:", err)
 }
 
 ...
