@@ -334,6 +334,18 @@ func (fd *FD) Close() error {
 		return err
 	}
 	defer fd.Unlock()
+	return fd.CloseUnlocked()
+}
+
+// CloseUnlocked is equivalent to (*FD).Close, with the difference
+// that with CloseUnlocked the caller is responsible for locking the
+// FD before calling it, and unlocking it after. It can be useful for
+// performing clean-up operations (e.g. reset tty settings) atomically
+// with Close.
+func (fd *FD) CloseUnlocked() error {
+
+	// !! Caller MUST hold both locks !!
+
 	fd.closed = true
 
 	// ev is not used by EpollCtl/DEL. Just don't pass a nil
