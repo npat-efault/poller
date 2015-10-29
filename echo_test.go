@@ -165,7 +165,7 @@ func sendN(r, w *poller.FD, n int) error {
 			break
 		}
 		if mr.Seq() != uint32(i) {
-			err = fmt.Errorf("rcv seq %d != %d", mr.Seq, i)
+			err = fmt.Errorf("rcv seq %d != %d", mr.Seq(), i)
 			break
 		}
 		if !bytes.Equal(ms.Data(), mr.Data()) {
@@ -191,7 +191,7 @@ func echoN(r, w *poller.FD, n int) error {
 			break
 		}
 		if m.Seq() != uint32(i) {
-			err = fmt.Errorf("rcv seq %d != %d", m.Seq, i)
+			err = fmt.Errorf("rcv seq %d != %d", m.Seq(), i)
 			break
 		}
 		err = w.SetWriteDeadline(time.Now().Add(2 * time.Second))
