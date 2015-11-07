@@ -476,3 +476,70 @@ func TestDeadlines(t *testing.T) {
 		t.Fatal("Close R:", err)
 	}
 }
+
+// TestXBlock tests if a blocking misc call for an FD (fd1r---keeping
+// the FD locked for the duration), blocks access to another FD
+// (fd0r). With v1.0.0 it should, starting with v1.1.0, it shouldn't
+func TestXBlock(t *testing.T) {
+	mkFifo(t, 0)
+	fd0r := openFifo(t, 0, true)
+	fd0w := openFifo(t, 0, false)
+
+	mkFifo(t, 1)
+	fd1r := openFifo(t, 1, true)
+	fd1w := openFifo(t, 1, false)
+
+	fd0c := make(chan error)
+	fd1c := make(chan error)
+
+	go func() {
+		fd0r.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+		debugf("FD %d: Reading", fd0r.id)
+		fd0c <- readStr(fd0r, "Hello")
+	}()
+
+	go func() {
+		if err := fd1r.Lock(); err != nil {
+			fd1c <- err
+			return
+		}
+		debugf("FD %d: Locked", fd1r.id)
+		time.Sleep(200 * time.Millisecond)
+		debugf("FD %d: About to unlock", fd1r.id)
+		fd1r.Unlock()
+		fd1c <- nil
+	}()
+
+	// Wait for fd1r to get locked.
+	time.Sleep(10 * time.Millisecond)
+	// This will generate an ER (read event) on fd1r.
+	writeStr(fd1w, "Block")
+	// Wait for event on fd1r to be received from epoll
+	time.Sleep(10 * time.Millisecond)
+
+	// This will generate an ER on fd0r.
+	writeStr(fd0w, "Hello")
+
+	// In v1.0.0, code that delivers events, tries to grab the
+	// same lock as misc operations (fd.Lock()) do, and epoll
+	// event delivery is serialized. So the ER on fd1r will wait
+	// for fd1r to be unlocked before it is delivered, and the ER
+	// on fd0r will wait for the ER on fd1r. In the mean time the
+	// deadline on fd0r will expire.
+
+	// This should normally succeed.
+	waitN(t, fd1c, 1)
+	// This should fail with ErrTimeout if FD's do cross-block.
+	waitN(t, fd0c, 1)
+
+	clo := func(f *FD, s string) {
+		err := f.Close()
+		if err != nil {
+			t.Fatalf("Close %s: %v", s, err)
+		}
+	}
+	clo(fd0w, "fd0w")
+	clo(fd0r, "fd0r")
+	clo(fd1w, "fd1w")
+	clo(fd1r, "fd1r")
+}

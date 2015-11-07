@@ -79,7 +79,10 @@ type fdCtl struct {
 type FD struct {
 	id int // Key in fdMap[] (immutable)
 
-	// Must hold both R and W locks to set
+	// Lock C protects misc operations against Close
+	c sync.Mutex
+	// Must hold all C, R and W locks and to set. Must hold one
+	// (any) of these locks to read
 	sysfd  int  // Unix file descriptor
 	closed bool // Set by Close(), never cleared
 
@@ -327,8 +330,8 @@ func fdIO(fd *FD, write bool, p []byte) (n int, err error) {
 // ErrClosed. Any subsequent operations (after Close) on the
 // file-descriptor will also fail with ErrClosed.
 func (fd *FD) Close() error {
-	// Take both locks, to exclude read and write operations from
-	// accessing a closed sysfd.
+	// Take the C lock, to exclude misc operations from accessing
+	// a closed sysfd.
 	if err := fd.Lock(); err != nil {
 		debugf("FD %03d: CL: Closed", fd.id)
 		return err
@@ -343,11 +346,13 @@ func (fd *FD) Close() error {
 // performing clean-up operations (e.g. reset tty settings) atomically
 // with Close.
 func (fd *FD) CloseUnlocked() error {
-
-	// !! Caller MUST hold both locks !!
+	// Caller MUST already hold the C lock. Take the both R and W
+	// locks, to exclude Read and Write operations from accessing
+	// a closed sysfd.
+	fd.r.cond.L.Lock()
+	fd.w.cond.L.Lock()
 
 	fd.closed = true
-
 	// ev is not used by EpollCtl/DEL. Just don't pass a nil
 	// pointer.
 	var ev syscall.EpollEvent
@@ -370,6 +375,9 @@ func (fd *FD) CloseUnlocked() error {
 	fd.w.cond.Broadcast()
 
 	debugf("FD %03d: CL: close(sysfd=%d)", fd.id, fd.sysfd)
+
+	fd.w.cond.L.Unlock()
+	fd.r.cond.L.Unlock()
 	return err
 }
 
@@ -465,12 +473,14 @@ func setDeadline(fd *FD, write bool, t time.Time) error {
 //     deffer fd.Unlock()
 //     ... do ioctl on fd.Sysfd() ...
 //
+// Notice that Read's and Write's *can* happen concurrently with misc
+// operations on a locked FD---as this is not, necessarily, an
+// error. Lock protects *only* against concurent Close's.
+//
 func (fd *FD) Lock() error {
-	fd.r.cond.L.Lock()
-	fd.w.cond.L.Lock()
+	fd.c.Lock()
 	if fd.closed {
-		fd.w.cond.L.Unlock()
-		fd.r.cond.L.Unlock()
+		fd.c.Unlock()
 		return ErrClosed
 	}
 	return nil
@@ -478,8 +488,7 @@ func (fd *FD) Lock() error {
 
 // Unlock unlocks the file-descriptor.
 func (fd *FD) Unlock() {
-	fd.w.cond.L.Unlock()
-	fd.r.cond.L.Unlock()
+	fd.c.Unlock()
 }
 
 // Sysfd returns the system file-descriptor associated with the given
