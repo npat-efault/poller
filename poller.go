@@ -307,13 +307,15 @@ func fdIO(fd *FD, write bool, p []byte) (n int, err error) {
 
 /*
 
-  - Close must acquire *both* locks (read and write) before
-    proceeding. Otherwise there is the danger that a concurent read or
-    write operation will access a closed (and possibly re-opened)
-    sysfd.
+  - Close must acquire *all* locks (read, write and C) before
+    proceeding. Otherwise there is the danger that a concurent read,
+    write, or misc operation will access a closed (and possibly
+    re-opened) sysfd.
 
-  - Misc operations (e.g. ioctls) also acquire bock locks, though it
-    is not strictly necessary.
+  - Misc operations (e.g. ioctls) acquire only the C lock. Misc
+    operations *can* happen concurrently with reads and writes on the
+    same (or other) fds. They are only protected against concurrent
+    close's.
 
   - Deadline operations (Set*Deadline) acquire the respective
     locks. SetReadDeadline acquires the read lock, SetWriteDeadline
