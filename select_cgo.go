@@ -34,7 +34,7 @@ import (
 
 type fdSet syscall.FdSet
 
-func (fs *fdSet) Clear(fds ...int) {
+func (fs *fdSet) Clr(fds ...int) {
 	for _, fd := range fds {
 		C.fdclr(C.int(fd), (*C.fd_set)(unsafe.Pointer(fs)))
 	}
