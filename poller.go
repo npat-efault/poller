@@ -10,6 +10,7 @@
 package poller
 
 import (
+	"log"
 	"syscall"
 	"time"
 )
@@ -196,4 +197,10 @@ func (fd *FD) Unlock() {
 // poller file-descriptor. See also (*FD).Lock.
 func (fd *FD) Sysfd() int {
 	return fd.sysfd
+}
+
+func debugf(format string, v ...interface{}) {
+	if debug_enable {
+		log.Printf("poller: "+format, v...)
+	}
 }

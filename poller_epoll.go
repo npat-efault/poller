@@ -434,14 +434,6 @@ func poller() {
 	}
 }
 
-func debugf(format string, v ...interface{}) {
-	if debug_enable {
-		log.Printf("poller: "+format, v...)
-	}
-}
-
-const debug_enable = false
-
 var fdM fdMap
 var epfd int = -1
 
