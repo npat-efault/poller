@@ -7,16 +7,12 @@
 
 package poller
 
-import (
-	"syscall"
-	"time"
-)
+import "syscall"
 
-func uxSelect(nfd int, r, w, e *fdSet, tmo time.Duration) (n int, err error) {
-	tv := NsecToTimeval(tmo.Nanoseconds())
+func uxSelect(nfd int, r, w, e *fdSet, tv *syscall.Timeval) (n int, err error) {
 	return syscall.Select(nfd,
 		(*syscall.FdSet)(r),
 		(*syscall.FdSet)(w),
 		(*syscall.FdSet)(e),
-		&tv)
+		tv)
 }
