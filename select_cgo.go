@@ -50,6 +50,6 @@ func (fs *fdSet) Zero() {
 	C.fdzero((*C.fd_set)(unsafe.Pointer(fs)))
 }
 
-func (fs *fdSet) IsSet(fd int) {
+func (fs *fdSet) IsSet(fd int) bool {
 	return C.fdisset(C.int(fd), (*C.fd_set)(unsafe.Pointer(fs))) != 0
 }
