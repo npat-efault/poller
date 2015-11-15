@@ -207,7 +207,7 @@ func (sc *selectCtx) drainPfdr() {
 	}
 }
 
-func setStr(s fdSet, nfd int) string {
+func setStr(s *fdSet, nfd int) string {
 	var str string
 	n := nfd
 	if n > 16 {
@@ -229,7 +229,7 @@ func setStr(s fdSet, nfd int) string {
 	return str
 }
 
-func debugSets(pref string, rs, ws fdSet, nfds int) {
+func debugSets(pref string, rs, ws *fdSet, nfds int) {
 	if debug_enable {
 		debugf("%srs: %s, ws: %s", pref,
 			setStr(rs, nfds), setStr(ws, nfds))
@@ -240,7 +240,7 @@ func debugSets(pref string, rs, ws fdSet, nfds int) {
 func (sc *selectCtx) run() {
 	for {
 		nfds, rs, ws := sc.getSets()
-		debugSets("SL  IN: ", rs, ws, nfds)
+		debugSets("SL  IN: ", &rs, &ws, nfds)
 		n, err := uxSelect(nfds, &rs, &ws, nil, nil)
 		if err != nil {
 			if err == syscall.EBADF || err == syscall.EINTR {
@@ -272,7 +272,7 @@ func (sc *selectCtx) run() {
 		// it. The check for fd.closed (which we do while
 		// holding the read or write lock) will catch this.
 		//
-		debugSets("SL OUT: ", rs, ws, nfds)
+		debugSets("SL OUT: ", &rs, &ws, nfds)
 		for sysfd := 0; sysfd < nfds && n > 0; sysfd++ {
 			isr, isw := rs.IsSet(sysfd), ws.IsSet(sysfd)
 			if !isr && !isw {
