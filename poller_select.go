@@ -305,7 +305,7 @@ func newFD(sysfd int) (*FD, error) {
 - The following can wake us: A read or write event from the select
   goroutine. A call to Close (sets fd.closed = 1). The expiration of a
   timer / deadline (sets fd.r/w.timeout = 1). All events wake-up all
-  goroutines waiting (cond.Broadcast).
+  goroutines waiting on the fd (cond.Broadcast).
 
 */
 
@@ -356,6 +356,9 @@ func fdIO(fd *FD, write bool, p []byte) (n int, err error) {
 			}
 			// EAGAIN
 			debugf("%s Wait", dpre)
+			// NOTE(npat): We may avoid setting/notifying
+			// if sysfd is already set (by another
+			// groutine doing the same access on the fd).
 			sc.Set(fd.sysfd, dir)
 			sc.Notify()
 			fdc.cond.Wait()
@@ -434,10 +437,10 @@ func timerEvent(sysfd int, write bool) {
 			dpre = fmt.Sprintf("FD %03d: TW:", sysfd)
 		}
 	}
-	// The fd returned by fdM.Get may be a new fd (the fd may have
-	// been closed, and a new one opened with the same sysfd). It
-	// won't harm because checking fd.{r,w}.deadline will
-	// determine if this is a valid timeout event.
+	// The fd returned by fdM.GetFD may be a new fd (the fd may
+	// have been closed, and a new one opened with the same
+	// sysfd). It won't harm because checking fd.{r,w}.deadline
+	// will determine if this is a valid timeout event.
 	fd := fdM.GetFD(sysfd)
 	if fd == nil {
 		// Drop event. Fd closed and removed from fdM.
@@ -458,7 +461,7 @@ func timerEvent(sysfd int, write bool) {
 		!fdc.deadline.IsZero() && !fdc.deadline.After(time.Now()) {
 		fdc.timeout = true
 		sc.Clear(sysfd, dir)
-		// ?? Notify select here ??
+		// NOTE(npat): Notify select here ??
 		fdc.cond.Broadcast()
 		debugf("%s Broadcast", dpre)
 	} else {

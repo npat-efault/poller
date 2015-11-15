@@ -59,18 +59,18 @@ epoll(7).
 
 For other POSIX systems (that is, most Unix-like systems), a more
 portable fallback implementation based on select(2) is provided. It
-has the same semantics as the linux epoll(7)-based implementation, but
+has the same semantics as the Linux epoll(7)-based implementation, but
 is expected to be of lower performance. The select(2)-based
 implementation uses CGo for some ancillary select-related operations.
 
-Ideally system-specific io-multiplexing or async-io facilities
+Ideally, system-specific io-multiplexing or async-io facilities
 (e.g. kqueue(2), or /dev/poll(7)) should be used to provide higher
 performance implementations for other systems. Patches for this will
 be greatly appreciated.
 
 If you wish, you can build package poller on Linux to use the
 select(2)-based implementation instead of the epoll(7) one. To do this
-define the build-tag "noepoll". There is normally no reason to do
+define the build-tag "noepoll". Normally, there is no reason to do
 this.
 
 */
