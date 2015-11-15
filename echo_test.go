@@ -34,8 +34,11 @@ import (
 )
 
 const (
-	nPairs = 8   // Number of Sender / Echoer pairs
-	nMsg   = 100 // Number of messages sent to each Echoer
+	nPairs  = 8     // Number of Sender / Echoer pairs
+	nMsg    = 100   // Number of messages sent to each Echoer
+	noRand  = false // Do not use random messages
+	msgSz   = 1024  // Message size (only used if noRand is true)
+	waitSec = 60    // Wait for test to complete (Seconds).
 )
 
 // !! ATTENTION !! We unconditionally delete files named like this !!
@@ -70,10 +73,14 @@ func unpackUInt16BE(p []byte) (uint16, []byte) {
 }
 
 func packRandData(p []byte, n int) []byte {
-	// This is *very* slow due to the repetitive locking /
+	// This can be *very* slow due to the repetitive locking /
 	// unlocking of the common random source.
 	for i := 0; i < n; i++ {
-		p = append(p, byte(rand.Intn(0x100)))
+		if noRand {
+			p = append(p, byte(i))
+		} else {
+			p = append(p, byte(rand.Intn(0x100)))
+		}
 	}
 	return p
 }
@@ -95,7 +102,12 @@ const (
 type msg []byte
 
 func randMsg(seq uint32) msg {
-	n := rand.Intn(0x10000 - headSz)
+	var n int
+	if noRand {
+		n = msgSz
+	} else {
+		n = rand.Intn(0x10000 - headSz)
+	}
 	l := headSz + n
 	m := make(msg, 0, l)
 	m = packUInt16BE(m, uint16(l))
@@ -290,7 +302,7 @@ func TestEcho(t *testing.T) {
 			ch <- err
 		}(i)
 	}
-	waitNTmo(t, ch, nPairs*2, 60*time.Second)
+	waitNTmo(t, ch, nPairs*2, waitSec*time.Second)
 
 	for i := 0; i < nPairs; i++ {
 		if err := fdr[2*i].Close(); err != nil {
