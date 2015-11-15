@@ -18,74 +18,6 @@ import (
 	"time"
 )
 
-// fdMap maps unix-fds (sysfds) to poller-FDs (*FD).
-type fdMap struct {
-	sync.Mutex
-	fd map[int]*FD
-}
-
-func (fdm *fdMap) Init(n int) {
-	fdm.fd = make(map[int]*FD, n)
-}
-
-func (fdm *fdMap) AddFD(fd *FD) {
-	fdm.Lock()
-	if _, ok := fdm.fd[fd.sysfd]; ok {
-		fdm.Unlock()
-		log.Panicf("poller: Add existing fd: %d", fd.sysfd)
-	}
-	fdm.fd[fd.sysfd] = fd
-	fdm.Unlock()
-}
-
-func (fdm *fdMap) GetFD(sysfd int) *FD {
-	fdm.Lock()
-	fd := fdm.fd[sysfd]
-	fdm.Unlock()
-	return fd
-}
-
-func (fdm *fdMap) DelFD(fd *FD) {
-	fdm.Lock()
-	if _, ok := fdm.fd[fd.sysfd]; !ok {
-		fdm.Unlock()
-		log.Panicf("poller: Del non-existing fd: %d", fd.sysfd)
-	}
-	delete(fdm.fd, fd.sysfd)
-	fdm.Unlock()
-}
-
-// fdCtl keeps control fields (locks, timers, etc) for a single
-// direction. For every FD there is one fdCtl for Read operations and
-// another for Write operations.
-type fdCtl struct {
-	mu       sync.Mutex
-	cond     *sync.Cond
-	deadline time.Time
-	timer    *time.Timer
-	timeout  bool
-}
-
-// FD is a poller file-descriptor. Typically a file-descriptor
-// connected to a terminal, a pseudo terminal, a character device, a
-// FIFO (named pipe), or any unix stream that supports the epoll(7)
-// interface.
-type FD struct {
-	// Same as sysfd. Not really required but left for more
-	// uniform testing.
-	id int
-	// Lock C protects misc operations against Close
-	c sync.Mutex
-	// Must hold all C, R and W locks and to set. Must hold one
-	// (any) of these locks to read
-	sysfd  int  // Unix file descriptor
-	closed bool // Set by Close(), never cleared
-
-	// Must hold respective lock to access
-	r fdCtl // Control fields for Read operations
-	w fdCtl // Control fields for Write operations
-}
-
 // selectCtx contains variables used to interact with the select
 // goroutine.
 type selectCtx struct {
@@ -177,10 +109,13 @@ func (sc *selectCtx) Clear(sysfd int, rw dirFlag) {
 	if rw&dirWrite != 0 {
 		sc.wset.Clr(sysfd)
 	}
+	// NOTE(npat): It would be nice if, at some point, we could
+	// reset sc.fdmax
 	sc.Unlock()
 }
 
 func (sc *selectCtx) Notify() {
+	// Write 1 byte, don't care what
 	_, err := syscall.Write(sc.pfdw, sc.b)
 	// Don't care if it fails with EAGAIN
 	if err != nil && err != syscall.EAGAIN {
@@ -328,6 +263,7 @@ func newFD(sysfd int) (*FD, error) {
 		return nil, err
 	}
 	// Check if sysfd is select-able
+	// NOTE(npat): Is this useful? Can it ever fail?
 	var rs fdSet
 	var tv syscall.Timeval
 	rs.Zero()
@@ -337,13 +273,16 @@ func newFD(sysfd int) (*FD, error) {
 		debugf("FD %03d: NF: select(2): %s", sysfd, err.Error())
 		return nil, err
 	}
-	// Initialize FD
+	// Initialize FD. We don't generate arbitrary ids, instead we
+	// use sysfd as the fdMap id. In effect, fd.id is alays ==
+	// fd.sysfd. Remember that sysfd's can be reused; we must be
+	// carefull not to allow this to mess things up.
 	fd := &FD{id: sysfd, sysfd: sysfd}
 	fd.r.cond = sync.NewCond(&fd.r.mu)
 	fd.w.cond = sync.NewCond(&fd.w.mu)
 	// Add to fdMap
 	fdM.AddFD(fd)
-	debugf("FD %03d: NF: Ok", fd.sysfd)
+	debugf("FD %03d: NF: Ok", fd.id)
 	return fd, nil
 }
 
@@ -384,7 +323,7 @@ func fdIO(fd *FD, write bool, p []byte) (n int, err error) {
 		sysc = syscall.Read
 		errEOF = io.EOF
 		if debug_enable {
-			dpre = fmt.Sprintf("FD %03d: RD:", fd.sysfd)
+			dpre = fmt.Sprintf("FD %03d: RD:", fd.id)
 		}
 	} else {
 		// Prepare things for Write.
@@ -393,7 +332,7 @@ func fdIO(fd *FD, write bool, p []byte) (n int, err error) {
 		sysc = syscall.Write
 		errEOF = io.ErrUnexpectedEOF
 		if debug_enable {
-			dpre = fmt.Sprintf("FD %03d: WR:", fd.sysfd)
+			dpre = fmt.Sprintf("FD %03d: WR:", fd.id)
 		}
 	}
 	// Read & Write are identical
@@ -469,67 +408,18 @@ func (fd *FD) closeUnlocked() error {
 		fd.w.timer.Stop()
 	}
 	sc.Clear(fd.sysfd, dirRead|dirWrite)
-	fdM.DelFD(fd)
+	fdM.DelFD(fd.id)
 	err := syscall.Close(fd.sysfd)
 
 	// Wake up everybody waiting on the FD.
 	fd.r.cond.Broadcast()
 	fd.w.cond.Broadcast()
 
-	debugf("FD %03d: CL: close", fd.sysfd)
+	debugf("FD %03d: CL: close", fd.id)
 
 	fd.w.cond.L.Unlock()
 	fd.r.cond.L.Unlock()
 	return err
-}
-
-// TODO(npat): If deadline is not After(time.Now()) wake-up goroutines
-// imediatelly; don't go through the timer callback
-
-func setDeadline(fd *FD, write bool, t time.Time) error {
-	var fdc *fdCtl
-	var dpre string
-
-	if !write {
-		// Setting read deadline
-		fdc = &fd.r
-		if debug_enable {
-			dpre = fmt.Sprintf("FD %03d: DR:", fd.sysfd)
-		}
-	} else {
-		// Setting write deadline
-		fdc = &fd.w
-		if debug_enable {
-			dpre = fmt.Sprintf("FD %03d: DW:", fd.sysfd)
-		}
-	}
-	// R & W deadlines are handled identically
-	fdc.cond.L.Lock()
-	if fd.closed {
-		fdc.cond.L.Unlock()
-		return ErrClosed
-	}
-	fdc.deadline = t
-	fdc.timeout = false
-	if t.IsZero() {
-		if fdc.timer != nil {
-			fdc.timer.Stop()
-		}
-		debugf("%s Removed dl", dpre)
-	} else {
-		d := t.Sub(time.Now())
-		if fdc.timer == nil {
-			sysfd := fd.sysfd
-			fdc.timer = time.AfterFunc(d,
-				func() { timerEvent(sysfd, write) })
-		} else {
-			fdc.timer.Stop()
-			fdc.timer.Reset(d)
-		}
-		debugf("%s Set dl: %v", dpre, d)
-	}
-	fdc.cond.L.Unlock()
-	return nil
 }
 
 func timerEvent(sysfd int, write bool) {

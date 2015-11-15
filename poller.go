@@ -10,10 +10,106 @@
 package poller
 
 import (
+	"fmt"
 	"log"
+	"sync"
 	"syscall"
 	"time"
 )
+
+// TODO(npat): Perhaps lock fdMap with a RWMutex??
+
+//  fdMap maps IDs (arbitrary integers) to FD structs. IDs are *not*
+//  reused, so if we get stale file-descriptor events (which are keyed
+//  by ID), no harm is done.
+//
+//  NOTE: Some implementations (e.g. the select(2)-based one) use
+//  sysfds (Unix file descriptors) instead of arbitrary IDs to map FD
+//  structs. In this case, since sysfds *are* reused, the implications
+//  of the reuse must be taken into considereation by the
+//  implementation.
+type fdMap struct {
+	mu  sync.Mutex
+	seq int
+	fd  map[int]*FD
+}
+
+func (fdm *fdMap) Init(n int) {
+	// For easier debugging, start with a large ID so that we can
+	// easily tell apart sysfd's from IDs
+	fdm.seq = 100
+	fdm.fd = make(map[int]*FD, n)
+}
+
+// GetFD returns the FD with key id. Returns nil if no such FD is in
+// the map.
+func (fdm *fdMap) GetFD(id int) *FD {
+	fdm.mu.Lock()
+	fd := fdm.fd[id]
+	fdm.mu.Unlock()
+	return fd
+}
+
+// GetID reserves and returns the next available ID
+func (fdm *fdMap) GetID() int {
+	fdm.mu.Lock()
+	id := fdm.seq
+	fdm.seq++
+	fdm.mu.Unlock()
+	return id
+}
+
+// AddFD creates an entry for the FD with key "fd.id".
+func (fdm *fdMap) AddFD(fd *FD) {
+	fdm.mu.Lock()
+	if _, ok := fdm.fd[fd.id]; ok {
+		fdm.mu.Unlock()
+		log.Panicf("poller: Add existing fd: %d", fd.id)
+	}
+	fdm.fd[fd.id] = fd
+	fdm.mu.Unlock()
+}
+
+func (fdm *fdMap) DelFD(id int) {
+	fdm.mu.Lock()
+	if _, ok := fdm.fd[id]; !ok {
+		fdm.mu.Unlock()
+		log.Panicf("poller: Del non-existing fd: %d", id)
+	}
+	delete(fdm.fd, id)
+	fdm.mu.Unlock()
+}
+
+// fdCtl keeps control fields (locks, timers, etc) for a single
+// direction. For every FD there is one fdCtl for Read operations and
+// another for Write operations.
+type fdCtl struct {
+	mu       sync.Mutex
+	cond     *sync.Cond
+	deadline time.Time
+	timer    *time.Timer
+	timeout  bool
+}
+
+// FD is a poller file-descriptor. Typically a file-descriptor
+// connected to a terminal, a pseudo terminal, a character device, a
+// FIFO (named pipe), or any unix stream that can be used by the
+// system's file-descriptor multiplexing mechanism (epoll(7),
+// select(2), etc).
+type FD struct {
+	id int // Key in fdMap[] (immutable)
+
+	// Lock C protects misc operations against Close
+	c sync.Mutex
+	// Must hold all C, R and W locks and to set. Must hold one
+	// (any) of these locks to read
+	sysfd  int  // Unix file descriptor
+	closed bool // Set by Close(), never cleared
+
+	// Must hold respective lock to access
+	r fdCtl // Control fields for Read operations
+	w fdCtl // Control fields for Write operations
+}
 
 // Flags to Open
 const (
@@ -162,6 +258,55 @@ func (fd *FD) SetReadDeadline(t time.Time) error {
 // file-descriptor.
 func (fd *FD) SetWriteDeadline(t time.Time) error {
 	return setDeadline(fd, true, t)
+}
+
+// TODO(npat): If deadline is not After(time.Now()) wake-up goroutines
+// imediatelly; don't go through the timer callback
+
+func setDeadline(fd *FD, write bool, t time.Time) error {
+	var fdc *fdCtl
+	var dpre string
+
+	if !write {
+		// Setting read deadline
+		fdc = &fd.r
+		if debug_enable {
+			dpre = fmt.Sprintf("FD %03d: DR:", fd.id)
+		}
+	} else {
+		// Setting write deadline
+		fdc = &fd.w
+		if debug_enable {
+			dpre = fmt.Sprintf("FD %03d: DW:", fd.id)
+		}
+	}
+	// R & W deadlines are handled identically
+	fdc.cond.L.Lock()
+	if fd.closed {
+		fdc.cond.L.Unlock()
+		return ErrClosed
+	}
+	fdc.deadline = t
+	fdc.timeout = false
+	if t.IsZero() {
+		if fdc.timer != nil {
+			fdc.timer.Stop()
+		}
+		debugf("%s Removed dl", dpre)
+	} else {
+		d := t.Sub(time.Now())
+		if fdc.timer == nil {
+			id := fd.id
+			fdc.timer = time.AfterFunc(d,
+				func() { timerEvent(id, write) })
+		} else {
+			fdc.timer.Stop()
+			fdc.timer.Reset(d)
+		}
+		debugf("%s Set dl: %v", dpre, d)
+	}
+	fdc.cond.L.Unlock()
+	return nil
 }
 
 // Lock the file-descriptor. It must be called before perfoming

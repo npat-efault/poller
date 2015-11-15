@@ -18,83 +18,6 @@ import (
 	"time"
 )
 
-// TODO(npat): Perhaps lock fdMap with a RWMutex??
-
-//  fdMap maps IDs (arbitrary integers) to FD structs. IDs are *not*
-//  reused, so if we get stale events from EpollWait (which are keyed
-//  by ID), no harm is done.
-type fdMap struct {
-	mu  sync.Mutex
-	seq int
-	fd  map[int]*FD
-}
-
-func (fdm *fdMap) Init(n int) {
-	// For easier debugging, start with a large ID so that we can
-	// easily tell apart sysfd's from IDs
-	fdm.seq = 100
-	fdm.fd = make(map[int]*FD, n)
-}
-
-func (fdm *fdMap) GetFD(id int) *FD {
-	fdm.mu.Lock()
-	fd := fdm.fd[id]
-	fdm.mu.Unlock()
-	return fd
-}
-
-// GetID reserves and returns the next available ID
-func (fdm *fdMap) GetID() int {
-	fdm.mu.Lock()
-	id := fdm.seq
-	fdm.seq++
-	fdm.mu.Unlock()
-	return id
-}
-
-// AddFD creates an entry for the FD with key "fd.id".
-func (fdm *fdMap) AddFD(fd *FD) {
-	fdm.mu.Lock()
-	fdm.fd[fd.id] = fd
-	fdm.mu.Unlock()
-}
-
-func (fdm *fdMap) DelFD(id int) {
-	fdm.mu.Lock()
-	delete(fdm.fd, id)
-	fdm.mu.Unlock()
-}
-
-// fdCtl keeps control fields (locks, timers, etc) for a single
-// direction. For every FD there is one fdCtl for Read operations and
-// another for Write operations.
-type fdCtl struct {
-	mu       sync.Mutex
-	cond     *sync.Cond
-	deadline time.Time
-	timer    *time.Timer
-	timeout  bool
-}
-
-// FD is a poller file-descriptor. Typically a file-descriptor
-// connected to a terminal, a pseudo terminal, a character device, a
-// FIFO (named pipe), or any unix stream that supports the epoll(7)
-// interface.
-type FD struct {
-	id int // Key in fdMap[] (immutable)
-
-	// Lock C protects misc operations against Close
-	c sync.Mutex
-	// Must hold all C, R and W locks and to set. Must hold one
-	// (any) of these locks to read
-	sysfd  int  // Unix file descriptor
-	closed bool // Set by Close(), never cleared
-
-	// Must hold respective lock to access
-	r fdCtl // Control fields for Read operations
-	w fdCtl // Control fields for Write operations
-}
-
 // TODO(npat): Add finalizer
 
 func newFD(sysfd int) (*FD, error) {
@@ -276,55 +199,6 @@ func (fd *FD) closeUnlocked() error {
 	fd.w.cond.L.Unlock()
 	fd.r.cond.L.Unlock()
 	return err
-}
-
-// TODO(npat): If deadline is not After(time.Now()) wake-up goroutines
-// imediatelly; don't go through the timer callback
-
-func setDeadline(fd *FD, write bool, t time.Time) error {
-	var fdc *fdCtl
-	var dpre string
-
-	if !write {
-		// Setting read deadline
-		fdc = &fd.r
-		if debug_enable {
-			dpre = fmt.Sprintf("FD %03d: DR:", fd.id)
-		}
-	} else {
-		// Setting write deadline
-		fdc = &fd.w
-		if debug_enable {
-			dpre = fmt.Sprintf("FD %03d: DW:", fd.id)
-		}
-	}
-	// R & W deadlines are handled identically
-	fdc.cond.L.Lock()
-	if fd.closed {
-		fdc.cond.L.Unlock()
-		return ErrClosed
-	}
-	fdc.deadline = t
-	fdc.timeout = false
-	if t.IsZero() {
-		if fdc.timer != nil {
-			fdc.timer.Stop()
-		}
-		debugf("%s Removed dl", dpre)
-	} else {
-		d := t.Sub(time.Now())
-		if fdc.timer == nil {
-			id := fd.id
-			fdc.timer = time.AfterFunc(d,
-				func() { timerEvent(id, write) })
-		} else {
-			fdc.timer.Stop()
-			fdc.timer.Reset(d)
-		}
-		debugf("%s Set dl: %v", dpre, d)
-	}
-	fdc.cond.L.Unlock()
-	return nil
 }
 
 func timerEvent(id int, write bool) {
