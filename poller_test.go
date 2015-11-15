@@ -3,6 +3,8 @@
 // Use of this source code is governed by a BSD-style license that can
 // be found in the LICENSE.txt file.
 
+// +build linux freebsd netbsd openbsd darwin dragonfly solaris
+
 package poller
 
 import (
@@ -129,24 +131,6 @@ func writeBlock(fd *FD, n, bs int, dly time.Duration) error {
 		}
 	}
 	return nil
-}
-
-func TestNewFDFail(t *testing.T) {
-	sysfd, err := syscall.Open("/dev/null", O_RW, 0666)
-	if err != nil {
-		t.Fatal("Open /dev/null:", err)
-	}
-	fd, err := NewFD(sysfd)
-	if err != syscall.EPERM {
-		t.Fatal("NewFD:", err)
-	}
-	if fd != nil {
-		t.Fatal("fd != nil!")
-	}
-	err = syscall.Close(sysfd)
-	if err != nil {
-		t.Fatal("Close /dev/null:", err)
-	}
 }
 
 func TestOpen(t *testing.T) {
@@ -279,6 +263,41 @@ func TestClose(t *testing.T) {
 	if err != nil {
 		t.Fatal("Close R:", err)
 	}
+}
+
+func TestCloseWrite(t *testing.T) {
+	mkFifo(t, 0)
+	fdr := openFifo(t, 0, true)
+	fdw := openFifo(t, 0, false)
+	_ = fdr
+
+	clwrite := func() error {
+		// must fill write buffer
+		b := make([]byte, 1024*1024)
+		n, err := fdw.Write(b)
+		if err != nil {
+			if err != syscall.EPIPE {
+				return err
+			}
+		}
+		if n >= len(b) {
+			return fmt.Errorf("Write n >= %d: %d", len(b), n)
+		}
+		return nil
+	}
+
+	end := make(chan error)
+
+	go func() { end <- clwrite() }()
+	go func() { end <- clwrite() }()
+	go func() { end <- clwrite() }()
+	time.Sleep(10 * time.Millisecond)
+	err := fdr.Close()
+	if err != nil {
+		t.Fatal("Close R:", err)
+	}
+
+	waitN(t, end, 3)
 }
 
 func TestRead(t *testing.T) {
