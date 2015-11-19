@@ -1,4 +1,4 @@
-#poller [![GoDoc](https://godoc.org/github.com/npat-efault/poller?status.png)](https://godoc.org/github.com/npat-efault/poller)
+# poller [![GoDoc](https://godoc.org/github.com/npat-efault/poller?status.png)](https://godoc.org/github.com/npat-efault/poller)
 Package poller is a file-descriptor multiplexer.
 
 Download:
@@ -54,7 +54,8 @@ All operations on poller FDs are thread-safe; you can use the same FD
 from multiple go-routines. It is, for example, safe to close a file
 descriptor blocked on a Read or Write call from another go-routine.
 
-##Supported systems
+### Supported systems
+
 Linux systems are supported using an implementations based on
 epoll(7).
 
