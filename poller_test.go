@@ -434,7 +434,7 @@ func TestDeadlines(t *testing.T) {
 	if err != nil {
 		t.Fatal("SetReadDeadline:", err)
 	}
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(20 * time.Millisecond)
 	go func() {
 		b := make([]byte, 1)
 		_, err = fdr.Read(b)
