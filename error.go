@@ -49,8 +49,10 @@ func newErr(msg string) error {
 // by the underlying system calls (open(2), read(2), write(2), etc.),
 // as well as io.EOF and io.ErrUnexpectedEOF.
 var (
-	// Use of closed poller file-descriptor
+	// Use of closed poller file-descriptor. ErrClosed has
+	// Closed() == true.
 	ErrClosed error = mkErr(efClosed, "use of closed descriptor")
-	// Operation timed-out
+	// Operation timed-out. ErrTimeout has Timeout() == true and
+	// Temporary() == true.
 	ErrTimeout error = mkErr(efTimeout, "timeout/deadline expired")
 )
