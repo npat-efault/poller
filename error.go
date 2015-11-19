@@ -3,39 +3,54 @@
 // Use of this source code is governed by a BSD-style license that can
 // be found in the LICENSE.txt file.
 
+// +build linux freebsd netbsd openbsd darwin dragonfly solaris
+
 package poller
 
-// Error is the type for the errors returned by poller functions and
-// methods. See also the ErrXXX constants.
-type Error int
+type errFlags int
+
+const (
+	efClosed errFlags = 1 << iota
+	efTimeout
+	efTemporary
+)
+
+type errT struct {
+	flags errFlags
+	msg   string
+}
+
+func (e *errT) Error() string {
+	return e.msg
+}
+
+func (e *errT) Timeout() bool {
+	return e.flags&efTimeout != 0
+}
+
+func (e *errT) Temporary() bool {
+	return e.flags&(efTimeout|efTemporary) != 0
+}
+
+func (e *errT) Closed() bool {
+	return e.flags&efClosed != 0
+}
+
+func mkErr(flags errFlags, msg string) error {
+	return &errT{flags: flags, msg: msg}
+}
+
+func newErr(msg string) error {
+	return &errT{msg: msg}
+}
 
 // Errors returned by poller functions and methods. In addition to
 // these, poller functions and methods may return the errors reported
 // by the underlying system calls (open(2), read(2), write(2), etc.),
 // as well as io.EOF and io.ErrUnexpectedEOF.
-const (
-	ErrClosed  Error = 1 // Use of closed poller file-descriptor
-	ErrTimeout Error = 2 // Operation timed-out
+var (
+	// Use of closed poller file-descriptor
+	ErrClosed error = mkErr(efClosed, "use of closed descriptor")
+	// Operation timed-out
+	ErrTimeout error = mkErr(efTimeout, "timeout/deadline expired")
 )
-
-// Error returns a string describing the error.
-func (e Error) Error() string {
-	switch e {
-	case ErrClosed:
-		return "use of closed descriptor"
-	case ErrTimeout:
-		return "I/O timeout error"
-	}
-	return "unknown error"
-}
-
-// Timeout returns true if the error indicates a timeout condition.
-func (e Error) Timeout() bool {
-	return e == ErrTimeout
-}
-
-// Temporary returns true if the error indicates a temporary condition
-// (re-atempting the operation may succeed).
-func (e Error) Temporary() bool {
-	return e.Timeout()
-}
