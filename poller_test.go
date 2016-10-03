@@ -10,6 +10,7 @@ package poller
 import (
 	"fmt"
 	"io"
+	"log"
 	"runtime"
 	"syscall"
 	"testing"
@@ -341,6 +342,49 @@ func TestRead(t *testing.T) {
 	err = fdw.Close()
 	if err != nil {
 		t.Fatal("Close W:", err)
+	}
+}
+
+func TestMany(t *testing.T) {
+	const NN = 256
+	fdr := make([]*FD, NN)
+	fdw := make([]*FD, NN)
+	for i := 0; i < NN; i++ {
+		mkFifo(t, i)
+		fdr[i] = openFifo(t, i, true)
+		fdw[i] = openFifo(t, i, false)
+	}
+
+	end := make(chan error)
+
+	dord := func(fdr *FD) {
+		b := make([]byte, 1)
+		_, err := fdr.Read(b)
+		if err != ErrTimeout {
+			end <- err
+		}
+		end <- nil
+	}
+
+	time.Sleep(20 * time.Second)
+	log.Println("---------")
+
+	for i := 0; i < NN; i++ {
+		fdr[i].SetDeadline(time.Now().Add(60 * time.Second))
+		go dord(fdr[i])
+	}
+	waitNTmo(t, end, NN, 61*time.Second)
+
+	for i := 0; i < NN; i++ {
+		err := fdr[i].Close()
+		if err != nil {
+			t.Fatal("Close R:", err)
+		}
+
+		err = fdw[i].Close()
+		if err != nil {
+			t.Fatal("Close W:", err)
+		}
 	}
 }
 
